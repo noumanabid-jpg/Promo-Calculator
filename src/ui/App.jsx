@@ -59,8 +59,18 @@ export default function App(){
           <p className="text-sm text-neutral-500">Week <span className="font-medium">{weekKey}</span></p>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <button className={\`rounded-2xl px-4 py-2 text-sm shadow-sm border \${tab==='planner'?'bg-black text-white':'bg-white'}\`} onClick={()=>setTab('planner')}>Planner</button>
-          <button className={\`rounded-2xl px-4 py-2 text-sm shadow-sm border \${tab==='results'?'bg-black text-white':'bg-white'}\`} onClick={()=>setTab('results')}>Results</button>
+          <button
+            className={`rounded-2xl px-4 py-2 text-sm shadow-sm border ${tab==='planner' ? 'bg-black text-white' : 'bg-white'}`}
+            onClick={()=>setTab('planner')}
+          >
+            Planner
+          </button>
+          <button
+            className={`rounded-2xl px-4 py-2 text-sm shadow-sm border ${tab==='results' ? 'bg-black text-white' : 'bg-white'}`}
+            onClick={()=>setTab('results')}
+          >
+            Results
+          </button>
         </div>
       </header>
 
