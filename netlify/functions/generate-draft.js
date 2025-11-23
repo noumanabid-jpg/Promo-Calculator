@@ -205,7 +205,7 @@ export default async function handler(request, context) {
     // 6) Apply guardrails & rounding to compute promo prices
     const out = [];
     for (const it of picks) {
-      const floor = applyGuardrails({ price: it.price, cost: it.cost }); // ≥3% margin, .50/.95 rounding
+      const floor = applyGuardrails({ price: it.price, cost: it.cost });
       if (!floor.ok || !floor.promo) {
         skippedImpossibleMargin++;
         continue;
