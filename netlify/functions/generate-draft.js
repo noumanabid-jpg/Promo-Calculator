@@ -223,7 +223,7 @@ export default async function handler(request, context) {
     }
 
     // 7) Persist draft in Netlify Blobs
-    const store = getStore();
+    const store = getStore('promo-planner');
     await store.setJSON(`promo_weeks/${week}.json`, {
       week,
       items: out,
