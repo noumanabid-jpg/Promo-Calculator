@@ -7,7 +7,6 @@ import { getStore } from '@netlify/blobs';
  * in the last `weeksBack` promo files.
  */
 export async function recentAppearances(variantId, weeksBack = 8) {
-  // Named store as required by Netlify Blobs v6
   const store = getStore('promo-planner');
   const out = [];
 
@@ -16,9 +15,8 @@ export async function recentAppearances(variantId, weeksBack = 8) {
       .toISOString()
       .slice(0, 10);
 
-    // ✅ get JSON via get(..., { type: 'json' })
+    // Read JSON via get(..., { type: 'json' })
     const week = await store.get(`promo_weeks/${dt}.json`, { type: 'json' });
-
     if (week && Array.isArray(week.items)) {
       const found = week.items.some((it) => it.variant_id === variantId);
       if (found) out.push(dt);
