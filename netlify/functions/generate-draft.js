@@ -2,7 +2,7 @@
 
 import { getStore } from '@netlify/blobs';
 import { gql, money } from './_shopify.js';
-import { roundPsych, applyGuardrails, normalize, scoreVariant } from './_engine.js';
+import { applyGuardrails, normalize, scoreVariant } from './_engine.js';
 import { recentAppearances } from './_fatigue.js';
 import { fetchOrdersSince } from './_analytics.js';
 
@@ -23,7 +23,6 @@ export default async function handler(req, res) {
     const week = new Date().toISOString().slice(0, 10);
 
     // 1) Pull products/variants with native Cost per item
-    //    cost: productVariant.inventoryItem.unitCost.amount
     const Q = `#graphql
       query VariantsForPromo($first: Int!) {
         products(first: $first) {
@@ -65,16 +64,39 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3) Gather candidate variants
     const all = [];
+    let skippedNoPriceOrCost = 0;
+    let skippedDoNot = 0;
+
+    // 3) Gather candidate variants
     for (const p of data.products.nodes) {
       const category = (p.productType || 'other').toLowerCase();
       const tagset = (p.tags || []).map((t) => String(t).toLowerCase());
-      const skip = tagset.includes(DO_NOT);
+      const skipTag = tagset.includes(DO_NOT);
 
       for (const v of p.variants.nodes) {
-        const cost = money(v.inventoryItem?.unitCost?.amount);
-        const price = money(v.price);
+        let price = money(v.price);
+        let cost = money(v.inventoryItem?.unitCost?.amount);
+        const compare_at = money(v.compareAtPrice);
+        const inventory = Number(v.inventoryQuantity || 0);
+        const velocity = orderUnitsByVariant[v.id] || 0;
+        const flags = [];
+
+        if (skipTag) {
+          skippedDoNot++;
+          continue;
+        }
+
+        if (!price || price <= 0) {
+          skippedNoPriceOrCost++;
+          continue;
+        }
+
+        // If cost is missing in Shopify, fallback to 70% of price, but mark it
+        if (!cost || cost <= 0) {
+          cost = Math.max(0.01, price * 0.7);
+          flags.push('cost:fallback');
+        }
 
         all.push({
           product_id: p.id,
@@ -85,15 +107,23 @@ export default async function handler(req, res) {
           variant: v.title,
           sku: v.sku,
           price,
-          compare_at: money(v.compareAtPrice),
-          inventory: Number(v.inventoryQuantity || 0),
+          compare_at,
+          inventory,
           cost,
-          skip,
+          skip: false,
           hero: tagset.includes('hero'),
-          velocity: orderUnitsByVariant[v.id] || 0,
-          flags: []
+          velocity,
+          flags
         });
       }
+    }
+
+    if (!all.length) {
+      return res.status(200).json({
+        week,
+        items: [],
+        debug: { reason: 'no-variants-after-basic-gather', skippedNoPriceOrCost, skippedDoNot }
+      });
     }
 
     // 4) Normalize signals + fatigue control
@@ -106,17 +136,19 @@ export default async function handler(req, res) {
     const imax = Math.max(...invVals, 1);
 
     const enriched = [];
-    for (const x of all) {
-      // basic guards
-      if (x.skip) continue;
-      if (x.cost <= 0 || x.price <= 0) continue;
-      if (x.price <= x.cost) continue;
+    let skippedFatigue = 0;
+    let skippedImpossibleMargin = 0;
 
+    for (const x of all) {
       // fatigue: avoid >2 recent weeks
       const appearances = await recentAppearances(x.variant_id, 8);
       const consecutive = appearances.length; // approximation (weekly file check)
-      if (consecutive > 2) continue;
+      if (consecutive > 2) {
+        skippedFatigue++;
+        continue;
+      }
 
+      // If price <= cost, we *try* guardrails; if that fails, we’ll drop later
       const marginHeadroom = x.price > 0 ? (x.price - x.cost) / x.price : 0;
       const stockPressure = x.inventory; // normalized below
 
@@ -129,6 +161,20 @@ export default async function handler(req, res) {
       };
       obj.score = scoreVariant(obj);
       enriched.push(obj);
+    }
+
+    if (!enriched.length) {
+      return res.status(200).json({
+        week,
+        items: [],
+        debug: {
+          reason: 'no-enriched-candidates',
+          totalAll: all.length,
+          skippedNoPriceOrCost,
+          skippedDoNot,
+          skippedFatigue
+        }
+      });
     }
 
     // 5) Pick top 6 fruit + top 6 veg
@@ -144,11 +190,27 @@ export default async function handler(req, res) {
 
     const picks = [...fruits, ...vegs];
 
+    if (!picks.length) {
+      return res.status(200).json({
+        week,
+        items: [],
+        debug: {
+          reason: 'no-picks-by-category',
+          totalEnriched: enriched.length,
+          fruitsCount: fruits.length,
+          vegsCount: vegs.length
+        }
+      });
+    }
+
     // 6) Apply guardrails & rounding to compute promo prices
     const out = [];
     for (const it of picks) {
       const floor = applyGuardrails({ price: it.price, cost: it.cost }); // ≥3% margin, .50/.95 rounding
-      if (!floor.ok) continue;
+      if (!floor.ok || !floor.promo) {
+        skippedImpossibleMargin++;
+        continue;
+      }
       const promo_price = floor.promo;
       const margin_promo = (promo_price - it.cost) / promo_price;
 
@@ -161,12 +223,30 @@ export default async function handler(req, res) {
       });
     }
 
-    // 7) Persist draft
     const store = getStore();
-    await store.setJSON(`promo_weeks/${week}.json`, { week, items: out, status: 'draft' });
+    await store.setJSON(`promo_weeks/${week}.json`, {
+      week,
+      items: out,
+      status: 'draft'
+    });
 
     res.setHeader('Content-Type', 'application/json');
-    return res.status(200).end(JSON.stringify({ week, items: out }));
+    return res.status(200).end(
+      JSON.stringify({
+        week,
+        items: out,
+        debug: {
+          totalAll: all.length,
+          totalEnriched: enriched.length,
+          fruitsTried: fruits.length,
+          vegsTried: vegs.length,
+          skippedNoPriceOrCost,
+          skippedDoNot,
+          skippedFatigue,
+          skippedImpossibleMargin
+        }
+      })
+    );
   } catch (e) {
     return res.status(500).json({ error: String(e) });
   }
