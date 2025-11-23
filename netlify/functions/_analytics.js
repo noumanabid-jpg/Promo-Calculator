@@ -43,13 +43,7 @@ export async function fetchOrdersSince(days = 56) {
 
 /**
  * Compute simple KPIs for a given promo week (YYYY-MM-DD).
- * We keep it minimal:
- * - units: total units sold in that 7-day window
- * - revenue: sum of order totals
- * - gm: 0 (placeholder)
- * - markdown: 0 (placeholder)
- * - orders: number of orders in window
- * - retention14: 0 (placeholder)
+ * Minimal, safe version (placeholders for gm/markdown/retention).
  */
 export async function kpisForWeek(week) {
   const start = new Date(week);
@@ -61,7 +55,6 @@ export async function kpisForWeek(week) {
   const startISO = start.toISOString();
   const endISO = end.toISOString();
 
-  // Fetch a reasonable window and filter in JS
   const allOrders = await fetchOrdersSince(90);
 
   const orders = allOrders.filter((o) => {
@@ -87,9 +80,7 @@ export async function kpisForWeek(week) {
       ordersCount += 1;
     }
 
-    const total = Number(
-      o.totalPriceSet?.shopMoney?.amount || 0
-    );
+    const total = Number(o.totalPriceSet?.shopMoney?.amount || 0);
     revenue += total;
   }
 
@@ -104,14 +95,8 @@ export async function kpisForWeek(week) {
 }
 
 /**
- * Hero learning stub.
- * In a full version this would:
- * - find top quartile performers among promo items
- * - tag them in Shopify (e.g. hero metafield/tag)
- *
- * For now we keep it a no-op to avoid extra scopes.
+ * Hero learning stub — no-op to avoid extra scopes.
  */
 export async function learnHeroes(week, promoItems = []) {
-  // no-op: return something harmless so callers don't crash
   return { week, updated: 0, considered: promoItems.length };
 }
