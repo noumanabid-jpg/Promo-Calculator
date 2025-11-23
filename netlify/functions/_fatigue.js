@@ -7,7 +7,7 @@ import { getStore } from '@netlify/blobs';
  * in the last `weeksBack` promo files.
  */
 export async function recentAppearances(variantId, weeksBack = 8) {
-  const store = getStore();
+  const store = getStore('promo-planner');
   const out = [];
 
   for (let i = 0; i < weeksBack; i++) {
