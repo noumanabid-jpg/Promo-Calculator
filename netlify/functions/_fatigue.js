@@ -15,7 +15,6 @@ export async function recentAppearances(variantId, weeksBack = 8) {
       .toISOString()
       .slice(0, 10);
 
-    // Read JSON via get(..., { type: 'json' })
     const week = await store.get(`promo_weeks/${dt}.json`, { type: 'json' });
     if (week && Array.isArray(week.items)) {
       const found = week.items.some((it) => it.variant_id === variantId);
