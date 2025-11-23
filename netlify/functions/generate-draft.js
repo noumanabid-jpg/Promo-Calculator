@@ -12,7 +12,7 @@ const TOP_FRUIT = Number(process.env.SUGGESTION_TOPN_FRUIT || 6);
 const TOP_VEG   = Number(process.env.SUGGESTION_TOPN_VEG   || 6);
 
 /**
- * Netlify function (ESM, new runtime): must return a Response
+ * Netlify function (new runtime): must return a Fetch API Response
  */
 export default async function handler(request, context) {
   try {
@@ -142,14 +142,14 @@ export default async function handler(request, context) {
     for (const x of all) {
       // fatigue: avoid >2 recent weeks
       const appearances = await recentAppearances(x.variant_id, 8);
-      const consecutive = appearances.length; // approximation (weekly files)
+      const consecutive = appearances.length;
       if (consecutive > 2) {
         skippedFatigue++;
         continue;
       }
 
       const marginHeadroom = x.price > 0 ? (x.price - x.cost) / x.price : 0;
-      const stockPressure = x.inventory; // normalized below
+      const stockPressure = x.inventory;
 
       const obj = {
         ...x,
