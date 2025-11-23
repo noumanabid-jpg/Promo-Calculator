@@ -12,9 +12,9 @@ const TOP_FRUIT = Number(process.env.SUGGESTION_TOPN_FRUIT || 6);
 const TOP_VEG   = Number(process.env.SUGGESTION_TOPN_VEG   || 6);
 
 /**
- * Netlify function: generate weekly draft (12 items)
+ * Netlify function (ESM, new runtime): must return a Response
  */
-export default async function handler(event, context) {
+export default async function handler(request, context) {
   try {
     const week = new Date().toISOString().slice(0, 10);
 
@@ -142,7 +142,7 @@ export default async function handler(event, context) {
     for (const x of all) {
       // fatigue: avoid >2 recent weeks
       const appearances = await recentAppearances(x.variant_id, 8);
-      const consecutive = appearances.length; // approximation (weekly file check)
+      const consecutive = appearances.length; // approximation (weekly files)
       if (consecutive > 2) {
         skippedFatigue++;
         continue;
@@ -249,11 +249,10 @@ export default async function handler(event, context) {
   }
 }
 
-/** Helper to return JSON in Netlify Functions */
-function json(statusCode, data) {
-  return {
-    statusCode,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  };
+/** Helper: build a Fetch API Response with JSON */
+function json(status, data) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json' }
+  });
 }
