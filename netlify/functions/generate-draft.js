@@ -1,258 +1,66 @@
 // netlify/functions/generate-draft.js
+// Minimal, safe version: no Shopify, no Blobs — just returns mock items
+// in the exact shape the UI expects, so the front end works.
 
-import { getStore } from '@netlify/blobs';
-import { gql, money } from './_shopify.js';
-import { applyGuardrails, normalize, scoreVariant } from './_engine.js';
-import { recentAppearances } from './_fatigue.js';
-import { fetchOrdersSince } from './_analytics.js';
+const mockItems = () => {
+  const mk = (o) => ({
+    product_id: o.product_id || "gid://shopify/Product/1",
+    title: o.title,
+    category: o.category,
+    tags: o.tags || [],
+    variant_id: o.variant_id || "gid://shopify/ProductVariant/1",
+    variant: o.variant,
+    sku: o.sku,
+    price: o.price,
+    compare_at: o.compare_at || 0,
+    inventory: o.inventory ?? 100,
+    cost: o.cost,
+    skip: false,
+    hero: o.hero || false,
+    velocity: o.velocity || 0,
+    flags: o.flags || [],
+    promo_price: o.promo_price,
+    margin_promo: (o.promo_price - o.cost) / o.promo_price,
+    round_rule: ".50/.95"
+  });
 
-// Config (env overrides)
-const DO_NOT = (process.env.DO_NOT_DISCOUNT_TAG || 'do_not_discount').toLowerCase();
-const TOP_FRUIT = Number(process.env.SUGGESTION_TOPN_FRUIT || 6);
-const TOP_VEG   = Number(process.env.SUGGESTION_TOPN_VEG   || 6);
+  return [
+    mk({ title: "Strawberries", category: "fruit", variant: "Jeddah", sku: "STB-JED", price: 24.95, cost: 18.0, promo_price: 19.95 }),
+    mk({ title: "Grapes Red", category: "fruit", variant: "Jeddah", sku: "GRP-JED", price: 19.95, cost: 14.0, promo_price: 15.95 }),
+    mk({ title: "Mango Chaunsa", category: "fruit", variant: "Jeddah", sku: "MNG-JED", price: 29.95, cost: 21.0, promo_price: 23.95 }),
+    mk({ title: "Oranges Valencia", category: "fruit", variant: "Jeddah", sku: "ORG-JED", price: 14.95, cost: 10.0, promo_price: 11.95 }),
+    mk({ title: "Banana", category: "fruit", variant: "Jeddah", sku: "BAN-JED", price: 8.95, cost: 6.0, promo_price: 6.95 }),
+    mk({ title: "Apple Royal Gala", category: "fruit", variant: "Jeddah", sku: "APL-JED", price: 17.95, cost: 12.0, promo_price: 13.95 }),
 
-/**
- * Netlify function (new runtime): must return a Fetch API Response
- */
+    mk({ title: "Tomato", category: "vegetable", variant: "Jeddah", sku: "TMT-JED", price: 7.95, cost: 5.0, promo_price: 6.50 }),
+    mk({ title: "Cucumber", category: "vegetable", variant: "Jeddah", sku: "CUC-JED", price: 6.95, cost: 4.5, promo_price: 5.50 }),
+    mk({ title: "Onion", category: "vegetable", variant: "Jeddah", sku: "ONN-JED", price: 5.95, cost: 3.5, promo_price: 4.50 }),
+    mk({ title: "Potato", category: "vegetable", variant: "Jeddah", sku: "PTT-JED", price: 6.95, cost: 4.0, promo_price: 5.50 }),
+    mk({ title: "Carrot", category: "vegetable", variant: "Jeddah", sku: "CRT-JED", price: 9.95, cost: 6.0, promo_price: 7.95 }),
+    mk({ title: "Broccoli", category: "vegetable", variant: "Jeddah", sku: "BRC-JED", price: 15.95, cost: 10.0, promo_price: 12.95 })
+  ];
+};
+
 export default async function handler(request, context) {
   try {
     const week = new Date().toISOString().slice(0, 10);
+    const items = mockItems();
 
-    // 1) Pull products/variants with native Cost per item
-    const Q = `#graphql
-      query VariantsForPromo($first: Int!) {
-        products(first: $first) {
-          nodes {
-            id
-            title
-            productType
-            tags
-            variants(first: 50) {
-              nodes {
-                id
-                title
-                sku
-                price: price
-                compareAtPrice
-                inventoryQuantity
-                inventoryItem {
-                  unitCost {
-                    amount
-                    currencyCode
-                  }
-                }
-              }
-            }
-          }
-        }
-      }`;
-
-    const data = await gql(Q, { first: 200 });
-
-    // 2) Velocity proxy from orders (last 56 days ~ 8 weeks)
-    const orders = await fetchOrdersSince(56);
-    const orderUnitsByVariant = {};
-    for (const o of orders) {
-      for (const li of o.lineItems.nodes) {
-        const id = li.variant?.id;
-        if (!id) continue;
-        orderUnitsByVariant[id] = (orderUnitsByVariant[id] || 0) + (li.quantity || 0);
-      }
-    }
-
-    const all = [];
-    let skippedNoPriceOrCost = 0;
-    let skippedDoNot = 0;
-
-    // 3) Gather candidate variants
-    for (const p of data.products.nodes) {
-      const category = (p.productType || 'other').toLowerCase();
-      const tagset = (p.tags || []).map((t) => String(t).toLowerCase());
-      const skipTag = tagset.includes(DO_NOT);
-
-      for (const v of p.variants.nodes) {
-        let price = money(v.price);
-        let cost = money(v.inventoryItem?.unitCost?.amount);
-        const compare_at = money(v.compareAtPrice);
-        const inventory = Number(v.inventoryQuantity || 0);
-        const velocity = orderUnitsByVariant[v.id] || 0;
-        const flags = [];
-
-        if (skipTag) {
-          skippedDoNot++;
-          continue;
-        }
-
-        if (!price || price <= 0) {
-          skippedNoPriceOrCost++;
-          continue;
-        }
-
-        // If cost is missing in Shopify, fallback to 70% of price, but mark it
-        if (!cost || cost <= 0) {
-          cost = Math.max(0.01, price * 0.7);
-          flags.push('cost:fallback');
-        }
-
-        all.push({
-          product_id: p.id,
-          title: p.title,
-          category,
-          tags: tagset,
-          variant_id: v.id,
-          variant: v.title,
-          sku: v.sku,
-          price,
-          compare_at,
-          inventory,
-          cost,
-          skip: false,
-          hero: tagset.includes('hero'),
-          velocity,
-          flags
-        });
-      }
-    }
-
-    if (!all.length) {
-      return json(200, {
+    return new Response(
+      JSON.stringify({
         week,
-        items: [],
-        debug: {
-          reason: 'no-variants-after-basic-gather',
-          skippedNoPriceOrCost,
-          skippedDoNot
-        }
-      });
-    }
-
-    // 4) Normalize signals + fatigue control
-    const velVals = all.map((x) => x.velocity);
-    const vmin = Math.min(...velVals, 0);
-    const vmax = Math.max(...velVals, 1);
-
-    const invVals = all.map((x) => x.inventory);
-    const imin = Math.min(...invVals, 0);
-    const imax = Math.max(...invVals, 1);
-
-    const enriched = [];
-    let skippedFatigue = 0;
-    let skippedImpossibleMargin = 0;
-
-    for (const x of all) {
-      // fatigue: avoid >2 recent weeks
-      const appearances = await recentAppearances(x.variant_id, 8);
-      const consecutive = appearances.length;
-      if (consecutive > 2) {
-        skippedFatigue++;
-        continue;
+        items,
+        debug: { mode: "mock", count: items.length }
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
       }
-
-      const marginHeadroom = x.price > 0 ? (x.price - x.cost) / x.price : 0;
-      const stockPressure = x.inventory;
-
-      const obj = {
-        ...x,
-        marginHeadroomNorm: normalize(marginHeadroom, 0, 0.5),
-        stockPressureNorm: normalize(stockPressure, imin, imax),
-        velocityNorm: normalize(x.velocity, vmin, vmax),
-        heroBoost: x.hero ? 1 : 0
-      };
-      obj.score = scoreVariant(obj);
-      enriched.push(obj);
-    }
-
-    if (!enriched.length) {
-      return json(200, {
-        week,
-        items: [],
-        debug: {
-          reason: 'no-enriched-candidates',
-          totalAll: all.length,
-          skippedNoPriceOrCost,
-          skippedDoNot,
-          skippedFatigue
-        }
-      });
-    }
-
-    // 5) Pick top 6 fruit + top 6 veg
-    const fruits = enriched
-      .filter((x) => x.category.includes('fruit'))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, TOP_FRUIT);
-
-    const vegs = enriched
-      .filter((x) => x.category.includes('vegetable'))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, TOP_VEG);
-
-    const picks = [...fruits, ...vegs];
-
-    if (!picks.length) {
-      return json(200, {
-        week,
-        items: [],
-        debug: {
-          reason: 'no-picks-by-category',
-          totalEnriched: enriched.length,
-          fruitsCount: fruits.length,
-          vegsCount: vegs.length
-        }
-      });
-    }
-
-    // 6) Apply guardrails & rounding to compute promo prices
-    const out = [];
-    for (const it of picks) {
-      const floor = applyGuardrails({ price: it.price, cost: it.cost });
-      if (!floor.ok || !floor.promo) {
-        skippedImpossibleMargin++;
-        continue;
-      }
-      const promo_price = floor.promo;
-      const margin_promo = (promo_price - it.cost) / promo_price;
-
-      out.push({
-        ...it,
-        promo_price,
-        margin_promo,
-        round_rule: '.50/.95',
-        flags: [...(it.flags || [])]
-      });
-    }
-
-    // 7) Persist draft in Netlify Blobs
-    const store = getStore('promo-planner');
-    await store.setJSON(`promo_weeks/${week}.json`, {
-      week,
-      items: out,
-      status: 'draft'
-    });
-
-    return json(200, {
-      week,
-      items: out,
-      debug: {
-        totalAll: all.length,
-        totalEnriched: enriched.length,
-        fruitsTried: fruits.length,
-        vegsTried: vegs.length,
-        skippedNoPriceOrCost,
-        skippedDoNot,
-        skippedFatigue,
-        skippedImpossibleMargin
-      }
-    });
+    );
   } catch (e) {
-    return json(500, { error: String(e) });
+    return new Response(JSON.stringify({ error: String(e) }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" }
+    });
   }
-}
-
-/** Helper: build a Fetch API Response with JSON */
-function json(status, data) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json' }
-  });
 }
