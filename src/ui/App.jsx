@@ -20,10 +20,16 @@ export default function App(){
   }, [])
 
   const manualDraft = useCallback(async ()=>{
-    setLoading(true)
-    const r = await fetch('/api/generate-draft?manual=1'); const data = await r.json()
-    setDraft(data); setLoading(false)
-  }, [])
+  setLoading(true);
+  try {
+    const r = await fetch('/api/generate-draft-live?manual=1');
+    const data = await r.json();
+    setDraft(data);
+  } finally {
+    setLoading(false);
+  }
+}, []);
+
 
   const exportCsv = useCallback(async ()=>{
     const r = await fetch('/api/export-csv'); const blob = await r.blob()
