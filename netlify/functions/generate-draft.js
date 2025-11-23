@@ -12,13 +12,9 @@ const TOP_FRUIT = Number(process.env.SUGGESTION_TOPN_FRUIT || 6);
 const TOP_VEG   = Number(process.env.SUGGESTION_TOPN_VEG   || 6);
 
 /**
- * Build weekly 12-item draft (6 fruit + 6 veg) using:
- * - Shopify Admin GraphQL for products/variants with native Cost per item
- * - Orders (last 8 weeks) for velocity proxy
- * - Fatigue control: avoid variants that appeared >2 recent weeks
- * - Guardrails: ≥3% margin, .50/.95 rounding
+ * Netlify function: generate weekly draft (12 items)
  */
-export default async function handler(req, res) {
+export default async function handler(event, context) {
   try {
     const week = new Date().toISOString().slice(0, 10);
 
@@ -119,10 +115,14 @@ export default async function handler(req, res) {
     }
 
     if (!all.length) {
-      return res.status(200).json({
+      return json(200, {
         week,
         items: [],
-        debug: { reason: 'no-variants-after-basic-gather', skippedNoPriceOrCost, skippedDoNot }
+        debug: {
+          reason: 'no-variants-after-basic-gather',
+          skippedNoPriceOrCost,
+          skippedDoNot
+        }
       });
     }
 
@@ -148,7 +148,6 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // If price <= cost, we *try* guardrails; if that fails, we’ll drop later
       const marginHeadroom = x.price > 0 ? (x.price - x.cost) / x.price : 0;
       const stockPressure = x.inventory; // normalized below
 
@@ -164,7 +163,7 @@ export default async function handler(req, res) {
     }
 
     if (!enriched.length) {
-      return res.status(200).json({
+      return json(200, {
         week,
         items: [],
         debug: {
@@ -191,7 +190,7 @@ export default async function handler(req, res) {
     const picks = [...fruits, ...vegs];
 
     if (!picks.length) {
-      return res.status(200).json({
+      return json(200, {
         week,
         items: [],
         debug: {
@@ -223,6 +222,7 @@ export default async function handler(req, res) {
       });
     }
 
+    // 7) Persist draft in Netlify Blobs
     const store = getStore();
     await store.setJSON(`promo_weeks/${week}.json`, {
       week,
@@ -230,24 +230,30 @@ export default async function handler(req, res) {
       status: 'draft'
     });
 
-    res.setHeader('Content-Type', 'application/json');
-    return res.status(200).end(
-      JSON.stringify({
-        week,
-        items: out,
-        debug: {
-          totalAll: all.length,
-          totalEnriched: enriched.length,
-          fruitsTried: fruits.length,
-          vegsTried: vegs.length,
-          skippedNoPriceOrCost,
-          skippedDoNot,
-          skippedFatigue,
-          skippedImpossibleMargin
-        }
-      })
-    );
+    return json(200, {
+      week,
+      items: out,
+      debug: {
+        totalAll: all.length,
+        totalEnriched: enriched.length,
+        fruitsTried: fruits.length,
+        vegsTried: vegs.length,
+        skippedNoPriceOrCost,
+        skippedDoNot,
+        skippedFatigue,
+        skippedImpossibleMargin
+      }
+    });
   } catch (e) {
-    return res.status(500).json({ error: String(e) });
+    return json(500, { error: String(e) });
   }
+}
+
+/** Helper to return JSON in Netlify Functions */
+function json(statusCode, data) {
+  return {
+    statusCode,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  };
 }
