@@ -1,19 +1,28 @@
-// functions/products-search.js
+// netlify/functions/products-search.js
 const { shopifyGraphql } = require('./utils/shopify.js')
 
 exports.handler = async (event) => {
   try {
     const shop = process.env.SHOPIFY_STORE
     const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
+
     if (!shop || !token) {
-      return { statusCode: 500, body: 'Missing SHOPIFY_SHOP or SHOPIFY_ADMIN_ACCESS_TOKEN' }
+      console.error('Missing env vars', { shop, hasToken: !!token })
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'Missing SHOPIFY_STORE or SHOPIFY_ADMIN_ACCESS_TOKEN' })
+      }
     }
 
     const q = (event.queryStringParameters?.q || '').trim()
     if (!q) {
-      return { statusCode: 200, body: JSON.stringify({ items: [] }) }
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ items: [] })
+      }
     }
 
+    // Search by title or SKU
     const query = `#graphql
       query SearchProducts($query: String!) {
         products(first: 20, query: $query) {
@@ -44,7 +53,7 @@ exports.handler = async (event) => {
       shop,
       token,
       query,
-      variables: { query: searchQuery },
+      variables: { query: searchQuery }
     })
 
     const edges = result?.data?.products?.edges || []
@@ -61,7 +70,7 @@ exports.handler = async (event) => {
           sku: v.sku,
           category: node.productType || '',
           price: Number(v.price ?? 0),
-          cost: 0,           // you can enrich this later from ERP
+          cost: 0,
           promo_price: Number(v.price ?? 0),
           margin_promo: 0,
           round_rule: '',
@@ -72,13 +81,13 @@ exports.handler = async (event) => {
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({ items })
     }
   } catch (err) {
     console.error('products-search error', err.response || err.message || err)
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: 'Server error' }),
+      body: JSON.stringify({ error: 'Server error' })
     }
   }
 }
