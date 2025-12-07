@@ -3,7 +3,7 @@ const { shopifyGraphql } = require('./utils/shopify.js')
 
 exports.handler = async (event) => {
   try {
-    const shop = process.env.SHOPIFY_SHOP
+    const shop = process.env.SHOPIFY_STORE
     const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
     if (!shop || !token) {
       return { statusCode: 500, body: 'Missing SHOPIFY_SHOP or SHOPIFY_ADMIN_ACCESS_TOKEN' }
