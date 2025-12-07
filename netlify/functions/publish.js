@@ -1,5 +1,14 @@
 // netlify/functions/publish.js
 
+let getStoreSafe = null;
+try {
+  // Only try to load @netlify/blobs if available
+  ({ getStore: getStoreSafe } = require('@netlify/blobs'));
+} catch (e) {
+  // Running without blobs or in environment where module isn't present
+  console.warn('Blobs not available, campaign history will be disabled');
+}
+
 exports.handler = async (event) => {
   try {
     if (event.httpMethod !== 'POST') {
@@ -7,7 +16,7 @@ exports.handler = async (event) => {
     }
 
     const shop  = process.env.SHOPIFY_STORE;
-    const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+    const token = process.env SHOPIFY_ADMIN_ACCESS_TOKEN;
 
     if (!shop || !token) {
       return {
@@ -21,7 +30,7 @@ exports.handler = async (event) => {
 
     const body  = event.body ? JSON.parse(event.body) : {};
     const items = Array.isArray(body.items) ? body.items : [];
-    const week  = body.week || null; // not strictly needed yet, but kept for future
+    const week  = body.week || null;
 
     if (!items.length) {
       return {
@@ -45,8 +54,8 @@ exports.handler = async (event) => {
     }
 
     // 1) Build map: productId -> { regular, promo }
-    const productConfig = new Map();   // productId -> { regular, promo }
-    const variantToProduct = new Map(); // variantId -> productId
+    const productConfig   = new Map();    // productId -> { regular, promo }
+    const variantToProduct = new Map();   // variantId -> productId
 
     for (const it of items) {
       const variantId = it.variant_id;
@@ -145,6 +154,47 @@ exports.handler = async (event) => {
       } catch (err) {
         console.error('Product loop error', productId, err);
         errors.push({ product_id: productId, error: err.message || String(err) });
+      }
+    }
+
+    // 3) Record campaign (non-blocking, best-effort)
+    if (getStoreSafe && productConfig.size) {
+      try {
+        const store = getStoreSafe('promo-campaigns');
+        const id    = new Date().toISOString();
+        const created_at = id;
+        const product_ids = Array.from(productConfig.keys());
+
+        const campaign = {
+          id,
+          week,
+          created_at,
+          product_ids
+        };
+
+        // Save detailed campaign
+        await store.set(`campaign:${id}`, JSON.stringify(campaign));
+
+        // Update index (list of campaigns)
+        let index = [];
+        const raw = await store.get('index');
+        if (raw) {
+          try { index = JSON.parse(raw) || []; } catch {}
+        }
+
+        index.unshift({
+          id,
+          week,
+          created_at,
+          product_count: product_ids.length
+        });
+
+        // keep last 50 campaigns
+        index = index.slice(0, 50);
+
+        await store.set('index', JSON.stringify(index));
+      } catch (err) {
+        console.error('Failed to write campaign history (non-fatal)', err);
       }
     }
 
