@@ -1,23 +1,35 @@
 // netlify/functions/rollback-campaign.js
 
 let getStoreSafe = null;
-let connectLambdaSafe = null;
 try {
-  ({ getStore: getStoreSafe, connectLambda: connectLambdaSafe } = require('@netlify/blobs'));
+  ({ getStore: getStoreSafe } = require('@netlify/blobs'));
 } catch (e) {
-  console.warn('Blobs not available, rollback-campaign will not work', e);
+  console.warn('[rollback-campaign] @netlify/blobs not available', e);
+}
+
+function getCampaignStore() {
+  if (!getStoreSafe) {
+    console.warn('[rollback-campaign] getStoreSafe is null');
+    return null;
+  }
+
+  const siteID = process.env.NETLIFY_SITE_ID;
+  const token  = process.env.NETLIFY_BLOBS_TOKEN;
+
+  if (!siteID || !token) {
+    console.warn('[rollback-campaign] Missing NETLIFY_SITE_ID or NETLIFY_BLOBS_TOKEN');
+    return null;
+  }
+
+  try {
+    return getStoreSafe('promo-campaigns', { siteID, token });
+  } catch (e) {
+    console.error('[rollback-campaign] getStore failed', e);
+    return null;
+  }
 }
 
 exports.handler = async (event) => {
-  // Initialise blobs env in Lambda-compat mode
-  if (connectLambdaSafe) {
-    try {
-      connectLambdaSafe(event);
-    } catch (e) {
-      console.warn('[rollback-campaign] connectLambda failed', e);
-    }
-  }
-
   try {
     if (event.httpMethod !== 'POST') {
       return { statusCode: 405, body: 'Method Not Allowed' };
@@ -36,7 +48,8 @@ exports.handler = async (event) => {
       };
     }
 
-    if (!getStoreSafe) {
+    const store = getCampaignStore();
+    if (!store) {
       return {
         statusCode: 500,
         body: JSON.stringify({
@@ -54,8 +67,7 @@ exports.handler = async (event) => {
       };
     }
 
-    const store = getStoreSafe('promo-campaigns');
-    const raw   = await store.get(`campaign:${id}`);
+    const raw = await store.get(`campaign:${id}`);
 
     if (!raw) {
       return {
@@ -78,7 +90,6 @@ exports.handler = async (event) => {
     const productIds = Array.isArray(campaign.product_ids) ? campaign.product_ids : [];
     const variantIdsFromCampaign = Array.isArray(campaign.variant_ids) ? campaign.variant_ids : [];
 
-    // Helper to call Shopify REST Admin
     async function shopifyFetch(path, opts = {}) {
       const url = `https://${shop}/admin/api/2024-07${path}`;
       const resp = await fetch(url, {
@@ -140,7 +151,7 @@ exports.handler = async (event) => {
         }
       }
     } else if (productIds.length) {
-      // Fallback: your previous product-based logic
+      // Fallback: product-level rollback
       for (const productId of productIds) {
         try {
           const pResp = await shopifyFetch(`/products/${productId}.json`, { method: 'GET' });
