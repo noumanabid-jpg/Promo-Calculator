@@ -1,43 +1,103 @@
-import { blobs } from '@netlify/blobs';
-import { gql } from './_shopify.js';
+// netlify/functions/publish.js
 
-export default async function handler(req, res){
-  try{
-    const week = new Date().toISOString().slice(0,10);
-    const store = blobs();
-    const draft = await store.getJSON(`promo_weeks/${week}.json`);
-    if(!draft?.items?.length) return res.status(400).json({ error:'No draft' });
-
-    // Group by product_id to enforce nationwide sync (all city variants same promo price)
-    const byProduct = new Map();
-    for(const it of draft.items){
-      if(!byProduct.has(it.product_id)) byProduct.set(it.product_id, it.promo_price);
-      else byProduct.set(it.product_id, Math.min(byProduct.get(it.product_id), it.promo_price)); // choose lowest among selected
+exports.handler = async (event) => {
+  try {
+    if (event.httpMethod !== 'POST') {
+      return { statusCode: 405, body: 'Method Not Allowed' }
     }
 
-    // Fetch variants for each product and apply same promo
-    const QProd = `#graphql
-      query OneProduct($id:ID!){ product(id:$id){ id variants(first:100){ nodes{ id price compareAtPrice } } } }`;
-    const MU = `#graphql
-      mutation UpdateVariantPrice($id:ID!, $price:Money, $compareAtPrice:Money){
-        productVariantUpdate(input:{ id:$id, price:$price, compareAtPrice:$compareAtPrice }){
-          userErrors{ field message }
-        }
-      }`;
-    const snapshots = [];
+    const shop  = process.env.SHOPIFY_STORE
+    const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
 
-    for(const [productId, targetPromo] of byProduct.entries()){
-      const prod = await gql(QProd, { id: productId });
-      for(const v of prod.product.variants.nodes){
-        snapshots.push({ variant_id: v.id, old_price: v.price, old_compare_at: v.compareAtPrice });
-        await gql(MU, { id: v.id, price: targetPromo, compareAtPrice: v.price });
+    if (!shop || !token) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ ok: false, error: 'Missing SHOPIFY_STORE or SHOPIFY_ADMIN_ACCESS_TOKEN' })
       }
     }
 
-    await store.setJSON(`price_snapshots/${week}.json`, { week, at: new Date().toISOString(), variants: snapshots });
-    await store.setJSON(`promo_weeks/${week}.json`, { ...draft, status:'published', publishedAt:new Date().toISOString() });
-    return res.status(200).json({ ok:true, products: byProduct.size, variants: snapshots.length });
-  }catch(e){
-    return res.status(500).json({ error:String(e) });
+    const body = event.body ? JSON.parse(event.body) : {}
+    const items = Array.isArray(body.items) ? body.items : []
+
+    if (!items.length) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ ok: false, error: 'No items to publish' })
+      }
+    }
+
+    let updated = 0
+    const errors = []
+
+    // Helper to call Shopify REST Admin
+    async function updateVariantPrice(variantId, price, compareAtPrice) {
+      const url = `https://${shop}/admin/api/2024-07/variants/${variantId}.json`
+
+      const payload = {
+        variant: {
+          id: variantId,
+          price: price
+        }
+      }
+
+      // Only send compare_at_price if we actually have it
+      if (compareAtPrice != null) {
+        payload.variant.compare_at_price = compareAtPrice
+      }
+
+      const resp = await fetch(url, {
+        method: 'PUT',
+        headers: {
+          'X-Shopify-Access-Token': token,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      })
+
+      if (!resp.ok) {
+        const text = await resp.text()
+        throw new Error(`Shopify error ${resp.status}: ${text}`)
+      }
+    }
+
+    // Logic: we assume draft items contain:
+    // - price       = regular price
+    // - promo_price = discount price
+    // On publish, we set:
+    // - variant.price           = promo_price
+    // - variant.compare_at_price = price
+    for (const it of items) {
+      const variantId = it.variant_id
+      if (!variantId) continue
+
+      const regular = Number(it.price ?? 0)
+      const promo   = Number(it.promo_price ?? 0)
+
+      // If no promo price, skip
+      if (!promo || promo <= 0) continue
+
+      try {
+        await updateVariantPrice(variantId, promo, regular > 0 ? regular : null)
+        updated++
+      } catch (err) {
+        console.error('Failed to update variant', variantId, err.message || err)
+        errors.push({ variant_id: variantId, error: err.message || String(err) })
+      }
+    }
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        ok: errors.length === 0,
+        updated,
+        errors
+      })
+    }
+  } catch (err) {
+    console.error('publish function error', err)
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ ok: false, error: 'Server error in publish function' })
+    }
   }
 }
