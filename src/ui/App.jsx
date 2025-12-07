@@ -173,39 +173,62 @@ export default function App(){
   }, [searchTerm])
 
   // NEW: add a product from searchResults into items[]
-  const addSearchResultToDraft = (p)=>{
-    setItems(prev => {
-      // avoid duplicates by variant_id or id+sku
-      const exists = prev.some(it =>
-        (p.variant_id && it.variant_id === p.variant_id) ||
-        (p.id && it.id === p.id && p.sku && it.sku === p.sku)
-      )
-      if (exists) return prev
+  const addSearchResultToDraft = async (p) => {
+  // 1) Fetch real cost from Shopify via /api/enrich-cost
+  let fetchedCost = null;
 
-      const price = Number(p.price ?? 0)
-      const cost  = Number(p.cost ?? 0)
-      const promo = Number(p.promo_price ?? price)
-      const margin_promo = promo > 0 ? (promo - cost) / promo : 0
-
-      const nextItem = {
-        // try to stay close to existing shape the backend uses
-        id: p.id,
-        variant_id: p.variant_id,
-        title: p.title || p.product_title || 'Untitled',
-        variant: p.variant || p.variant_title || '',
-        sku: p.sku || '',
-        category: p.category || '',
-        price,
-        cost,
-        promo_price: promo,
-        margin_promo,
-        round_rule: p.round_rule || '',
-        flags: p.flags || []
+  if (p.variant_id) {
+    try {
+      const res = await fetch(`/api/enrich-cost?variant_id=${p.variant_id}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.cost != null) {
+          fetchedCost = Number(data.cost);
+        }
+      } else {
+        console.error('enrich-cost HTTP error', res.status);
       }
-
-      return [...prev, nextItem]
-    })
+    } catch (err) {
+      console.error('enrich-cost fetch error', err);
+    }
   }
+
+  // 2) Update items list
+  setItems(prev => {
+    // avoid duplicates by variant_id or id+sku
+    const exists = prev.some(it =>
+      (p.variant_id && it.variant_id === p.variant_id) ||
+      (p.id && it.id === p.id && p.sku && it.sku === p.sku)
+    );
+    if (exists) return prev;
+
+    const price = Number(p.price ?? 0);
+    const cost  = Number(
+      fetchedCost ??   // real cost from inventory_item
+      p.cost ??        // fallback from search API (if ever set)
+      0
+    );
+    const promo = Number(p.promo_price ?? price);
+    const margin_promo = promo > 0 ? (promo - cost) / promo : 0;
+
+    const nextItem = {
+      id: p.id,
+      variant_id: p.variant_id,
+      title: p.title || p.product_title || 'Untitled',
+      variant: p.variant || p.variant_title || '',
+      sku: p.sku || '',
+      category: p.category || '',
+      price,
+      cost,
+      promo_price: promo,
+      margin_promo,
+      round_rule: p.round_rule || '',
+      flags: p.flags || []
+    };
+
+    return [...prev, nextItem];
+  });
+};
 
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
