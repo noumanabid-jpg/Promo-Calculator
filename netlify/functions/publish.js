@@ -1,23 +1,35 @@
 // netlify/functions/publish.js
 
 let getStoreSafe = null;
-let connectLambdaSafe = null;
 try {
-  ({ getStore: getStoreSafe, connectLambda: connectLambdaSafe } = require('@netlify/blobs'));
+  ({ getStore: getStoreSafe } = require('@netlify/blobs'));
 } catch (e) {
-  console.warn('[publish] Blobs not available, campaign history will be disabled', e);
+  console.warn('[publish] @netlify/blobs not available', e);
+}
+
+function getCampaignStore() {
+  if (!getStoreSafe) {
+    console.warn('[publish] getStoreSafe is null');
+    return null;
+  }
+
+  const siteID = process.env.NETLIFY_SITE_ID;
+  const token  = process.env.NETLIFY_BLOBS_TOKEN;
+
+  if (!siteID || !token) {
+    console.warn('[publish] Missing NETLIFY_SITE_ID or NETLIFY_BLOBS_TOKEN');
+    return null;
+  }
+
+  try {
+    return getStoreSafe('promo-campaigns', { siteID, token });
+  } catch (e) {
+    console.error('[publish] getStore failed', e);
+    return null;
+  }
 }
 
 exports.handler = async (event) => {
-  // IMPORTANT: initialise blobs env in Lambda-compat mode
-  if (connectLambdaSafe) {
-    try {
-      connectLambdaSafe(event);
-    } catch (e) {
-      console.warn('[publish] connectLambda failed (Blobs may not work)', e);
-    }
-  }
-
   try {
     if (event.httpMethod !== 'POST') {
       return { statusCode: 405, body: 'Method Not Allowed' };
@@ -79,7 +91,6 @@ exports.handler = async (event) => {
       let productId = variantToProduct.get(variantId);
 
       if (!productId) {
-        // lookup variant to find its product_id
         const vResp = await shopifyFetch(`/variants/${variantId}.json`, { method: 'GET' });
 
         if (!vResp.ok) {
@@ -95,7 +106,6 @@ exports.handler = async (event) => {
         variantToProduct.set(variantId, productId);
       }
 
-      // For now, first promo for a product wins
       if (!productConfig.has(productId)) {
         productConfig.set(productId, { regular, promo });
       }
@@ -136,7 +146,7 @@ exports.handler = async (event) => {
           const variantId     = v.id;
           const originalPrice = v.price;
 
-          const newPrice     = promo;                     // same promo for all variants
+          const newPrice     = promo;
           const newCompareAt = regular > 0 ? regular : originalPrice;
 
           const payload = {
@@ -171,11 +181,10 @@ exports.handler = async (event) => {
 
     // 3) Record campaign (non-blocking, best-effort)
     let campaignRecorded = false;
+    const campaignStore = getCampaignStore();
 
-    if (getStoreSafe && productConfig.size) {
+    if (campaignStore && productConfig.size) {
       try {
-        const store = getStoreSafe('promo-campaigns');
-
         const id         = new Date().toISOString();
         const created_at = id;
 
@@ -192,12 +201,10 @@ exports.handler = async (event) => {
           item_count: items.length
         };
 
-        // Save detailed campaign
-        await store.set(`campaign:${id}`, JSON.stringify(campaign));
+        await campaignStore.set(`campaign:${id}`, JSON.stringify(campaign));
 
-        // Update index (list of campaigns)
         let index = [];
-        const raw = await store.get('index');
+        const raw = await campaignStore.get('index');
         if (raw) {
           try {
             index = JSON.parse(raw) || [];
@@ -215,17 +222,16 @@ exports.handler = async (event) => {
           item_count: items.length
         });
 
-        // keep last 50 campaigns
         index = index.slice(0, 50);
 
-        await store.set('index', JSON.stringify(index));
+        await campaignStore.set('index', JSON.stringify(index));
         campaignRecorded = true;
         console.log('[publish] Campaign recorded', { id, week, productCount: product_ids.length });
       } catch (err) {
         console.error('[publish] Failed to write campaign history (non-fatal)', err);
       }
     } else {
-      console.log('[publish] Skipping campaign history: getStoreSafe =', !!getStoreSafe, 'productConfig size =', productConfig.size);
+      console.log('[publish] Skipping campaign history: campaignStore is null or no products');
     }
 
     return {
