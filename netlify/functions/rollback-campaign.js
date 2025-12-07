@@ -1,13 +1,23 @@
 // netlify/functions/rollback-campaign.js
 
 let getStoreSafe = null;
+let connectLambdaSafe = null;
 try {
-  ({ getStore: getStoreSafe } = require('@netlify/blobs'));
+  ({ getStore: getStoreSafe, connectLambda: connectLambdaSafe } = require('@netlify/blobs'));
 } catch (e) {
-  console.warn('Blobs not available, rollback-campaign will not work');
+  console.warn('Blobs not available, rollback-campaign will not work', e);
 }
 
 exports.handler = async (event) => {
+  // Initialise blobs env in Lambda-compat mode
+  if (connectLambdaSafe) {
+    try {
+      connectLambdaSafe(event);
+    } catch (e) {
+      console.warn('[rollback-campaign] connectLambda failed', e);
+    }
+  }
+
   try {
     if (event.httpMethod !== 'POST') {
       return { statusCode: 405, body: 'Method Not Allowed' };
@@ -85,7 +95,7 @@ exports.handler = async (event) => {
     let restored = 0;
     const errors = [];
 
-    // --- Option A: rollback by explicit variant_ids if present ---
+    // Prefer variant_ids if present
     if (variantIdsFromCampaign.length) {
       for (const variantId of variantIdsFromCampaign) {
         try {
@@ -130,7 +140,7 @@ exports.handler = async (event) => {
         }
       }
     } else if (productIds.length) {
-      // --- Option B: fallback to your existing product-based logic ---
+      // Fallback: your previous product-based logic
       for (const productId of productIds) {
         try {
           const pResp = await shopifyFetch(`/products/${productId}.json`, { method: 'GET' });
