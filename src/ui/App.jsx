@@ -499,14 +499,25 @@ export default function App(){
             {(items||[]).map((x, idx)=> (
               <article key={x.variant_id || x.sku || idx} className="rounded-2xl border bg-white p-4 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
                 <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 className="font-semibold leading-tight">{x.title} — {x.variant}</h3>
-                    <p className="text-xs text-neutral-500 mt-0.5">
-                      {x.category?.toUpperCase?.()} · SKU {x.sku}
-                    </p>
-                  </div>
-                  <Chip>{x.category}</Chip>
-                </div>
+  <div>
+    <h3 className="font-semibold leading-tight">{x.title} — {x.variant}</h3>
+    <p className="text-xs text-neutral-500 mt-0.5">
+      {x.category?.toUpperCase?.()} · SKU {x.sku}
+    </p>
+  </div>
+  <div className="flex flex-col items-end gap-2">
+    <Chip>{x.category}</Chip>
+    <button
+      type="button"
+      onClick={() =>
+        setItems(prev => prev.filter((_, i) => i !== idx))
+      }
+      className="rounded-full border px-2 py-1 text-[11px] text-neutral-600 hover:bg-red-50 hover:text-red-700"
+    >
+      Remove
+    </button>
+  </div>
+</div>
                 <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
                   {/* Regular (editable) */}
                   <div className="rounded-xl bg-neutral-50 p-3">
