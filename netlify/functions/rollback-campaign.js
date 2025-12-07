@@ -66,12 +66,7 @@ exports.handler = async (event) => {
     }
 
     const productIds = Array.isArray(campaign.product_ids) ? campaign.product_ids : [];
-    if (!productIds.length) {
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ ok: false, error: 'Campaign has no products recorded' })
-      };
-    }
+    const variantIdsFromCampaign = Array.isArray(campaign.variant_ids) ? campaign.variant_ids : [];
 
     // Helper to call Shopify REST Admin
     async function shopifyFetch(path, opts = {}) {
@@ -90,33 +85,26 @@ exports.handler = async (event) => {
     let restored = 0;
     const errors = [];
 
-    // Rollback logic: same as your global rollback,
-    // but scoped to productIds from this campaign.
-    for (const productId of productIds) {
-      try {
-        const pResp = await shopifyFetch(`/products/${productId}.json`, { method: 'GET' });
+    // --- Option A: rollback by explicit variant_ids if present ---
+    if (variantIdsFromCampaign.length) {
+      for (const variantId of variantIdsFromCampaign) {
+        try {
+          const vResp = await shopifyFetch(`/variants/${variantId}.json`, { method: 'GET' });
+          if (!vResp.ok) {
+            const t = await vResp.text();
+            console.error('Failed to fetch variant for rollback-campaign', variantId, vResp.status, t);
+            errors.push({ variant_id: variantId, error: `Variant fetch error ${vResp.status}` });
+            continue;
+          }
 
-        if (!pResp.ok) {
-          const t = await pResp.text();
-          console.error('Failed to fetch product for rollback-campaign', productId, pResp.status, t);
-          errors.push({ product_id: productId, error: `Product fetch error ${pResp.status}` });
-          continue;
-        }
-
-        const pData = await pResp.json();
-        const prod  = pData?.product;
-        if (!prod || !Array.isArray(prod.variants)) continue;
-
-        for (const v of prod.variants) {
-          const variantId = v.id;
-          const compareAt = v.compare_at_price;
-
-          if (!compareAt) continue;
+          const vData = await vResp.json();
+          const v = vData?.variant;
+          if (!v || !v.compare_at_price) continue;
 
           const payload = {
             variant: {
               id: variantId,
-              price: compareAt,
+              price: v.compare_at_price,
               compare_at_price: null
             }
           };
@@ -136,11 +124,68 @@ exports.handler = async (event) => {
           } else {
             restored++;
           }
+        } catch (err) {
+          console.error('Rollback-campaign variant loop error', variantId, err);
+          errors.push({ variant_id: variantId, error: err.message || String(err) });
         }
-      } catch (err) {
-        console.error('Rollback-campaign product loop error', productId, err);
-        errors.push({ product_id: productId, error: err.message || String(err) });
       }
+    } else if (productIds.length) {
+      // --- Option B: fallback to your existing product-based logic ---
+      for (const productId of productIds) {
+        try {
+          const pResp = await shopifyFetch(`/products/${productId}.json`, { method: 'GET' });
+
+          if (!pResp.ok) {
+            const t = await pResp.text();
+            console.error('Failed to fetch product for rollback-campaign', productId, pResp.status, t);
+            errors.push({ product_id: productId, error: `Product fetch error ${pResp.status}` });
+            continue;
+          }
+
+          const pData = await pResp.json();
+          const prod  = pData?.product;
+          if (!prod || !Array.isArray(prod.variants)) continue;
+
+          for (const v of prod.variants) {
+            const variantId = v.id;
+            const compareAt = v.compare_at_price;
+
+            if (!compareAt) continue;
+
+            const payload = {
+              variant: {
+                id: variantId,
+                price: compareAt,
+                compare_at_price: null
+              }
+            };
+
+            const upResp = await shopifyFetch(`/variants/${variantId}.json`, {
+              method: 'PUT',
+              body: JSON.stringify(payload)
+            });
+
+            if (!upResp.ok) {
+              const t = await upResp.text();
+              console.error('Rollback-campaign update error', variantId, upResp.status, t);
+              errors.push({
+                variant_id: variantId,
+                error: `Rollback update error ${upResp.status}`
+              });
+            } else {
+              restored++;
+            }
+          }
+        } catch (err) {
+          console.error('Rollback-campaign product loop error', productId, err);
+          errors.push({ product_id: productId, error: err.message || String(err) });
+        }
+      }
+    } else {
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ ok: false, error: 'Campaign has no products recorded' })
+      };
     }
 
     return {
