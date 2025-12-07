@@ -10,17 +10,21 @@ function Chip({children}){
 export default function App(){
   const [tab, setTab] = useState('planner')
   const [draft, setDraft] = useState({ week: '', items: [] })
-  const [items, setItems] = useState([])          // editable items
+  const [items, setItems] = useState([])          // editable items in planner
   const [loading, setLoading] = useState(false)
   const [csvHref, setCsvHref] = useState('')
   const [weeks, setWeeks] = useState([])
   const [msg, setMsg] = useState('')
 
-  // NEW: search state for manual add
-  const [searchTerm, setSearchTerm] = useState('')
+  // search state
+  const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState([])
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchError, setSearchError] = useState('')
+
+  // campaigns tab state
+  const [campaigns, setCampaigns] = useState([])
+  const [campaignLoading, setCampaignLoading] = useState(false)
 
   const weekKey = draft.week || new Date().toISOString().slice(0,10)
 
@@ -53,71 +57,116 @@ export default function App(){
     }
   }, [])
 
-  const exportCsv = useCallback(async ()=>{
+  // Client-side CSV export based on current planner items
+  const exportCsv = useCallback(() => {
+    if (!items.length) {
+      setMsg('No items to export')
+      return
+    }
+
+    const esc = (v) => {
+      const s = v === undefined || v === null ? '' : String(v)
+      return `"${s.replace(/"/g, '""')}"`
+    }
+
+    const header = [
+      'Title',
+      'Variant',
+      'SKU',
+      'Category',
+      'Price',
+      'Promo Price',
+      'Cost',
+      'Margin Promo (%)',
+      'Rounded',
+      'Flags'
+    ]
+
+    const rows = items.map(x => {
+      const price        = x.price ?? ''
+      const promoPrice   = x.promo_price ?? ''
+      const cost         = x.cost ?? ''
+      const marginPct    = x.margin_promo != null
+        ? (Number(x.margin_promo) * 100).toFixed(1)
+        : ''
+      const flags        = (x.flags || []).join(', ')
+
+      return [
+        esc(x.title),
+        esc(x.variant),
+        esc(x.sku),
+        esc(x.category),
+        esc(price),
+        esc(promoPrice),
+        esc(cost),
+        esc(marginPct),
+        esc(x.round_rule || ''),
+        esc(flags)
+      ].join(',')
+    })
+
+    const csvContent = [header.join(','), ...rows].join('\r\n')
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+
+    setCsvHref(url)
+    setMsg('CSV ready — click the download link below.')
+  }, [items])
+
+  // Publish: send current planner items to /api/publish
+  const publish = useCallback(async ()=>{
+    if (!items.length) {
+      setMsg('No items to publish')
+      return
+    }
+
     try {
-      const r = await fetch('/api/export-csv')
-      const blob = await r.blob()
-      const url = URL.createObjectURL(blob)
-      setCsvHref(url)
-      setMsg('CSV ready — click the download link below.')
-    } catch (e) {
-      console.error('export-csv error', e)
-      setMsg('Export CSV failed')
-    }
-  }, [])
-
-const publish = useCallback(async ()=>{
-  if (!items.length) {
-    setMsg('No items to publish')
-    return
-  }
-
-  try {
-    const r = await fetch('/api/publish', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        week: weekKey,
-        items
+      const r = await fetch('/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          week: weekKey,
+          items
+        })
       })
-    })
 
-    const data = await r.json()
-    if (data?.ok) {
-      setMsg(`Published ${data.updated || 0} variants to Shopify`)
-      loadDraft()
-    } else {
-      setMsg(data?.error || 'Publish failed')
+      const data = await r.json()
+      if (data?.ok) {
+        setMsg(`Published ${data.updated || 0} variants to Shopify`)
+        loadDraft()
+      } else {
+        setMsg(data?.error || 'Publish failed')
+      }
+    } catch (e) {
+      console.error('publish error', e)
+      setMsg('Publish failed')
     }
-  } catch (e) {
-    console.error('publish error', e)
-    setMsg('Publish failed')
-  }
-}, [items, weekKey, loadDraft])
+  }, [items, weekKey, loadDraft])
 
-const rollback = useCallback(async ()=>{
-  if (!items.length) {
-    setMsg('No items to rollback')
-    return
-  }
+  // Rollback: scoped to products in current planner
+  const rollback = useCallback(async ()=>{
+    if (!items.length) {
+      setMsg('No items to rollback')
+      return
+    }
 
-  try {
-    const r = await fetch('/api/rollback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items })
-    })
-    const data = await r.json()
-    setMsg(data?.ok
-      ? `Rollback done (restored ${data.restored || 0} variants)`
-      : data?.error || 'Rollback failed'
-    )
-    loadDraft()
-  } catch (e) {
-    console.error('rollback error', e)
-    setMsg('Rollback failed')
-  }
-}, [items, loadDraft])
+    try {
+      const r = await fetch('/api/rollback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items })
+      })
+      const data = await r.json()
+      setMsg(data?.ok
+        ? `Rollback done (restored ${data.restored || 0} variants)`
+        : data?.error || 'Rollback failed'
+      )
+      loadDraft()
+    } catch (e) {
+      console.error('rollback error', e)
+      setMsg('Rollback failed')
+    }
+  }, [items, loadDraft])
 
   const loadResults = useCallback( async ()=>{
     try {
@@ -150,9 +199,33 @@ const rollback = useCallback(async ()=>{
     }
   }, [weekKey, items])
 
-  useEffect(()=>{ loadDraft(); loadResults(); }, [loadDraft, loadResults])
+  // Load campaigns list (for Campaigns tab)
+  const loadCampaigns = useCallback(async ()=>{
+    setCampaignLoading(true)
+    try {
+      const r = await fetch('/api/campaigns')
+      const data = await r.json()
+      setCampaigns(data?.campaigns || [])
+    } catch (e) {
+      console.error('campaigns error', e)
+      setCampaigns([])
+    } finally {
+      setCampaignLoading(false)
+    }
+  }, [])
 
-  // Update a field (price / promo_price / cost) & recalc margin_promo
+  useEffect(()=>{ 
+    loadDraft(); 
+    loadResults(); 
+  }, [loadDraft, loadResults])
+
+  useEffect(() => {
+    if (tab === 'campaigns') {
+      loadCampaigns()
+    }
+  }, [tab, loadCampaigns])
+
+  // Update a field (price / promo_price) & recalc margin_promo
   const updateItemField = (index, field, rawValue)=>{
     const value = rawValue === '' ? '' : Number(rawValue)
 
@@ -172,92 +245,94 @@ const rollback = useCallback(async ()=>{
     )
   }
 
-  // NEW: remove one item from the draft (suggested or manually added)
-  const removeItem = (index)=>{
-    setItems(prev => prev.filter((_, i)=> i !== index))
-  }
+  // --- Search: call /api/products-search and allow adding to draft ---
 
-  // NEW: search products by name/SKU via /api/products-search
-  const searchProducts = useCallback(async ()=>{
-    const q = searchTerm.trim()
-    if (!q) return
+  const runSearch = useCallback(async ()=>{
+    const q = searchQuery.trim()
+    if (!q) {
+      setSearchResults([])
+      setSearchError('')
+      return
+    }
+
     setSearchLoading(true)
     setSearchError('')
     try {
       const r = await fetch(`/api/products-search?q=${encodeURIComponent(q)}`)
       if (!r.ok) {
-        throw new Error(`HTTP ${r.status}`)
+        throw new Error('Search failed')
       }
       const data = await r.json()
-      // backend can return { items: [...] } or { products: [...] }
-      const list = data.items || data.products || []
-      setSearchResults(list)
+      setSearchResults(data?.items || [])
+      if (!data?.items?.length) {
+        setSearchError('No products found for this query')
+      }
     } catch (e) {
       console.error('products-search error', e)
-      setSearchError('Could not fetch products. Please try again.')
+      setSearchError('Could not fetch products')
       setSearchResults([])
     } finally {
       setSearchLoading(false)
     }
-  }, [searchTerm])
+  }, [searchQuery])
 
-  // NEW: add a product from searchResults into items[]
+  // Add a searched product into planner, enriched with cost from Shopify
   const addSearchResultToDraft = async (p) => {
-  // 1) Fetch real cost from Shopify via /api/enrich-cost
-  let fetchedCost = null;
+    // 1) Fetch real cost from Shopify via /api/enrich-cost
+    let fetchedCost = null;
 
-  if (p.variant_id) {
-    try {
-      const res = await fetch(`/api/enrich-cost?variant_id=${p.variant_id}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.cost != null) {
-          fetchedCost = Number(data.cost);
+    if (p.variant_id) {
+      try {
+        const res = await fetch(`/api/enrich-cost?variant_id=${p.variant_id}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.cost != null) {
+            fetchedCost = Number(data.cost);
+          }
+        } else {
+          console.error('enrich-cost HTTP error', res.status);
         }
-      } else {
-        console.error('enrich-cost HTTP error', res.status);
+      } catch (err) {
+        console.error('enrich-cost fetch error', err);
       }
-    } catch (err) {
-      console.error('enrich-cost fetch error', err);
     }
-  }
 
-  // 2) Update items list
-  setItems(prev => {
-    // avoid duplicates by variant_id or id+sku
-    const exists = prev.some(it =>
-      (p.variant_id && it.variant_id === p.variant_id) ||
-      (p.id && it.id === p.id && p.sku && it.sku === p.sku)
-    );
-    if (exists) return prev;
+    // 2) Update items list
+    setItems(prev => {
+      // avoid duplicates by variant_id or id+sku
+      const exists = prev.some(it =>
+        (p.variant_id && it.variant_id === p.variant_id) ||
+        (p.id && it.id === p.id && p.sku && it.sku === p.sku)
+      );
+      if (exists) return prev;
 
-    const price = Number(p.price ?? 0);
-    const cost  = Number(
-      fetchedCost ??   // real cost from inventory_item
-      p.cost ??        // fallback from search API (if ever set)
-      0
-    );
-    const promo = Number(p.promo_price ?? price);
-    const margin_promo = promo > 0 ? (promo - cost) / promo : 0;
+      const price = Number(p.price ?? 0);
+      const cost  = Number(
+        fetchedCost ??   // real cost from inventory_item
+        p.cost ??        // fallback from search API (if ever set)
+        0
+      );
+      const promo = Number(p.promo_price ?? price);
+      const margin_promo = promo > 0 ? (promo - cost) / promo : 0;
 
-    const nextItem = {
-      id: p.id,
-      variant_id: p.variant_id,
-      title: p.title || p.product_title || 'Untitled',
-      variant: p.variant || p.variant_title || '',
-      sku: p.sku || '',
-      category: p.category || '',
-      price,
-      cost,
-      promo_price: promo,
-      margin_promo,
-      round_rule: p.round_rule || '',
-      flags: p.flags || []
-    };
+      const nextItem = {
+        id: p.id,
+        variant_id: p.variant_id,
+        title: p.title || p.product_title || 'Untitled',
+        variant: p.variant || p.variant_title || '',
+        sku: p.sku || '',
+        category: p.category || '',
+        price,
+        cost,
+        promo_price: promo,
+        margin_promo,
+        round_rule: p.round_rule || '',
+        flags: p.flags || []
+      };
 
-    return [...prev, nextItem];
-  });
-};
+      return [...prev, nextItem];
+    });
+  };
 
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
@@ -281,14 +356,20 @@ const rollback = useCallback(async ()=>{
           >
             Results
           </button>
+          <button
+            className={`rounded-2xl px-4 py-2 text-sm shadow-sm border ${tab==='campaigns' ? 'bg-black text-white' : 'bg-white'}`}
+            onClick={()=>setTab('campaigns')}
+          >
+            Campaigns
+          </button>
         </div>
       </header>
 
       {tab==='planner' ? (
-        <section overlooking className="mx-auto max-w-6xl px-4 pb-10">
-          <div className="mb-4 flex items-center gap-2 justify-between">
+        <section className="mx-auto max-w-6xl px-4 pb-10">
+          <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div className="text-xs text-neutral-500">
-              No time-gating: you can generate draft any day.
+              No time-gating: you can generate, tweak, and publish the draft any day.
             </div>
             <div className="flex gap-2 flex-wrap">
               <button
@@ -343,91 +424,88 @@ const rollback = useCallback(async ()=>{
             </div>
           ) : null}
 
-          {/* NEW: manual control bar – remove suggested, search & add */}
-          <div className="mb-6 rounded-2xl border bg-white p-4 shadow-sm">
-            <h2 className="text-sm font-semibold mb-3">
-              Manual adjustments
-            </h2>
-            <p className="text-xs text-neutral-500 mb-2">
-              Remove any suggested item below, or search by product name / SKU to add your own picks.
-            </p>
-
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e)=>setSearchTerm(e.target.value)}
-                placeholder="Search by product name or SKU…"
-                className="flex-1 rounded-md border px-3 py-2 text-sm"
-              />
-              <button
-                type="button"
-                onClick={searchProducts}
-                className="mt-2 sm:mt-0 rounded-2xl border px-4 py-2 text-sm bg-neutral-900 text-white disabled:opacity-60"
-                disabled={searchLoading}
-              >
-                {searchLoading ? 'Searching…' : 'Search & Add'}
-              </button>
+          {/* Search panel */}
+          <div className="mb-4 rounded-2xl border bg-white p-4 shadow-[0_2px_8px_rgba(0,0,0,0.03)]">
+            <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+              <div className="flex-1">
+                <label className="block text-xs font-medium text-neutral-600 mb-1">
+                  Add items manually by search (title / SKU)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e)=>setSearchQuery(e.target.value)}
+                    onKeyDown={(e)=>{ if(e.key === 'Enter'){ runSearch() } }}
+                    className="flex-1 rounded-xl border px-3 py-2 text-sm"
+                    placeholder="Search by product name or SKU…"
+                  />
+                  <button
+                    type="button"
+                    onClick={runSearch}
+                    disabled={searchLoading}
+                    className="rounded-xl border px-3 py-2 text-sm min-w-[100px]"
+                  >
+                    {searchLoading ? 'Searching…' : 'Search'}
+                  </button>
+                </div>
+                {searchError && (
+                  <p className="mt-1 text-xs text-red-600">{searchError}</p>
+                )}
+              </div>
             </div>
 
-            {searchError && (
-              <div className="mt-2 text-xs text-red-600">{searchError}</div>
-            )}
-
             {searchResults.length > 0 && (
-              <div className="mt-3 max-h-56 overflow-auto border-t pt-2 space-y-2">
-                {searchResults.map((p)=>(
-                  <div
-                    key={p.variant_id || p.id || p.sku}
-                    className="flex items-center justify-between text-sm py-1 border-b last:border-b-0"
-                  >
-                    <div className="pr-3">
-                      <div className="font-medium">
-                        {p.title || p.product_title || 'Untitled'}
-                      </div>
-                      <div className="text-xs text-neutral-500">
-                        {p.variant || p.variant_title} {p.sku ? `· SKU ${p.sku}` : ''}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={()=>addSearchResultToDraft(p)}
-                      className="text-xs px-2 py-1 border rounded-md hover:bg-green-50 hover:text-green-700"
-                    >
-                      Add to draft
-                    </button>
-                  </div>
-                ))}
+              <div className="mt-3 max-h-64 overflow-y-auto border-t pt-3">
+                <p className="text-xs text-neutral-500 mb-2">
+                  Click “Add” to include a variant in this week’s promo draft. Cost will be pulled from Shopify.
+                </p>
+                <table className="w-full text-xs">
+                  <thead className="bg-neutral-50 text-neutral-600">
+                    <tr>
+                      <th className="text-left px-2 py-1">Title</th>
+                      <th className="text-left px-2 py-1">Variant</th>
+                      <th className="text-left px-2 py-1">SKU</th>
+                      <th className="text-left px-2 py-1">Price</th>
+                      <th className="text-left px-2 py-1"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {searchResults.map((p, idx)=>(
+                      <tr key={p.variant_id || p.id || idx} className="border-t">
+                        <td className="px-2 py-1">{p.title}</td>
+                        <td className="px-2 py-1">{p.variant}</td>
+                        <td className="px-2 py-1">{p.sku}</td>
+                        <td className="px-2 py-1">{fmt(p.price)}</td>
+                        <td className="px-2 py-1 text-right">
+                          <button
+                            type="button"
+                            onClick={()=>addSearchResultToDraft(p)}
+                            className="rounded-full border px-3 py-1 text-[11px] hover:bg-neutral-100"
+                          >
+                            Add
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>
 
+          {/* Planner cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {(items||[]).map((x, idx)=> (
-              <article
-                key={x.variant_id || x.sku || idx}
-                className="rounded-2xl border bg-white p-4 shadow-[0_2px_10px_rgba(0,0,0,0.04)]"
-              >
+              <article key={x.variant_id || x.sku || idx} className="rounded-2xl border bg-white p-4 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <h3 className="font-semibold leading-tight">
-                      {x.title} — {x.variant}
-                    </h3>
+                    <h3 className="font-semibold leading-tight">{x.title} — {x.variant}</h3>
                     <p className="text-xs text-neutral-500 mt-0.5">
                       {x.category?.toUpperCase?.()} · SKU {x.sku}
                     </p>
                   </div>
-                  <div className="flex flex-col items-end gap-1">
-                    <Chip>{x.category}</Chip>
-                    {/* NEW: remove button per item */}
-                    <button
-                      type="button"
-                      onClick={()=>removeItem(idx)}
-                      className="text-[11px] text-red-600 hover:text-red-700 hover:underline"
-                    >
-                      Remove
-                    </button>
-                  </div>
+                  <Chip>{x.category}</Chip>
                 </div>
                 <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
                   {/* Regular (editable) */}
@@ -482,17 +560,37 @@ const rollback = useCallback(async ()=>{
                   </div>
                   <div className="rounded-xl bg-neutral-50 p-3">
                     <dt className="text-neutral-500">Flags</dt>
-                    <dd className="font-semibold text-xs">
-                      {(x.flags||[]).join(', ')||'-'}
-                    </dd>
+                    <dd className="font-semibold text-xs">{(x.flags||[]).join(', ')||'-'}</dd>
                   </div>
                 </dl>
               </article>
             ))}
           </div>
         </section>
-      ) : (
+      ) : tab==='results' ? (
         <Results weeks={weeks}/>
+      ) : (
+        <CampaignsView
+          campaigns={campaigns}
+          loading={campaignLoading}
+          onRollback={async (id) => {
+            try {
+              const r = await fetch(`/api/rollback-campaign?id=${encodeURIComponent(id)}`, {
+                method: 'POST'
+              })
+              const data = await r.json()
+              setMsg(
+                data?.ok
+                  ? `Rollback done for campaign ${id} (restored ${data.restored || 0} variants)`
+                  : data?.error || 'Rollback failed for campaign'
+              )
+              loadCampaigns()
+            } catch (e) {
+              console.error('rollback-campaign error', e)
+              setMsg('Rollback failed for campaign')
+            }
+          }}
+        />
       )}
     </div>
   )
@@ -534,6 +632,57 @@ function Results({weeks}){
           </tbody>
         </table>
       </div>
+    </section>
+  )
+}
+
+function CampaignsView({campaigns, loading, onRollback}) {
+  return (
+    <section className="mx-auto max-w-6xl px-4 pb-10">
+      <h2 className="text-lg font-semibold mb-3">Published Campaigns</h2>
+      <p className="text-xs text-neutral-500 mb-4">
+        Each row represents a publish event. Rollback is scoped to products that were part of that publish,
+        restoring their prices from compare-at pricing.
+      </p>
+
+      {loading ? (
+        <div className="text-sm text-neutral-500">Loading campaigns…</div>
+      ) : !campaigns.length ? (
+        <div className="text-sm text-neutral-500">No campaigns recorded yet.</div>
+      ) : (
+        <div className="overflow-x-auto rounded-2xl border bg-white">
+          <table className="w-full text-sm">
+            <thead className="bg-neutral-50 text-neutral-600">
+              <tr>
+                <th className="text-left px-4 py-3">Created</th>
+                <th className="text-left px-4 py-3">Week</th>
+                <th className="text-left px-4 py-3">Products</th>
+                <th className="text-left px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {campaigns.map(c => (
+                <tr key={c.id} className="border-t">
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {c.created_at || c.id}
+                  </td>
+                  <td className="px-4 py-3">{c.week || '-'}</td>
+                  <td className="px-4 py-3">{c.product_count ?? (c.product_ids?.length || 0)}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      type="button"
+                      onClick={() => onRollback(c.id)}
+                      className="rounded-full border px-3 py-1 text-xs hover:bg-red-50 hover:text-red-700"
+                    >
+                      Rollback this campaign
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   )
 }
