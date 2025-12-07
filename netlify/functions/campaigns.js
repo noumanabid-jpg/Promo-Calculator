@@ -1,30 +1,42 @@
 // netlify/functions/campaigns.js
 
 let getStoreSafe = null;
-let connectLambdaSafe = null;
 try {
-  ({ getStore: getStoreSafe, connectLambda: connectLambdaSafe } = require('@netlify/blobs'));
+  ({ getStore: getStoreSafe } = require('@netlify/blobs'));
 } catch (e) {
-  console.warn('[campaigns] Blobs not available, /api/campaigns will return empty list', e);
+  console.warn('[campaigns] @netlify/blobs not available', e);
+}
+
+function getCampaignStore() {
+  if (!getStoreSafe) {
+    console.warn('[campaigns] getStoreSafe is null');
+    return null;
+  }
+
+  const siteID = process.env.NETLIFY_SITE_ID;
+  const token  = process.env.NETLIFY_BLOBS_TOKEN;
+
+  if (!siteID || !token) {
+    console.warn('[campaigns] Missing NETLIFY_SITE_ID or NETLIFY_BLOBS_TOKEN');
+    return null;
+  }
+
+  try {
+    return getStoreSafe('promo-campaigns', { siteID, token });
+  } catch (e) {
+    console.error('[campaigns] getStore failed', e);
+    return null;
+  }
 }
 
 exports.handler = async (event) => {
-  // Initialise blobs env in Lambda-compat mode
-  if (connectLambdaSafe) {
-    try {
-      connectLambdaSafe(event);
-    } catch (e) {
-      console.warn('[campaigns] connectLambda failed', e);
-    }
-  }
-
   try {
     if (event.httpMethod !== 'GET') {
       return { statusCode: 405, body: 'Method Not Allowed' };
     }
 
-    if (!getStoreSafe) {
-      console.log('[campaigns] getStoreSafe is null – Blobs disabled or not configured');
+    const store = getCampaignStore();
+    if (!store) {
       return {
         statusCode: 200,
         body: JSON.stringify({
@@ -34,8 +46,6 @@ exports.handler = async (event) => {
         })
       };
     }
-
-    const store = getStoreSafe('promo-campaigns');
 
     let campaigns = [];
     try {
