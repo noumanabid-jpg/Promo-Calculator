@@ -95,17 +95,29 @@ const publish = useCallback(async ()=>{
   }
 }, [items, weekKey, loadDraft])
 
-  const rollback = useCallback(async ()=>{
-    try {
-      const r = await fetch('/api/rollback', { method:'POST' })
-      const data = await r.json()
-      setMsg(data?.ok ? 'Rollback done' : data?.error || 'Rollback failed')
-      loadDraft()
-    } catch (e) {
-      console.error('rollback error', e)
-      setMsg('Rollback failed')
-    }
-  }, [loadDraft])
+const rollback = useCallback(async ()=>{
+  if (!items.length) {
+    setMsg('No items to rollback')
+    return
+  }
+
+  try {
+    const r = await fetch('/api/rollback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    })
+    const data = await r.json()
+    setMsg(data?.ok
+      ? `Rollback done (restored ${data.restored || 0} variants)`
+      : data?.error || 'Rollback failed'
+    )
+    loadDraft()
+  } catch (e) {
+    console.error('rollback error', e)
+    setMsg('Rollback failed')
+  }
+}, [items, loadDraft])
 
   const loadResults = useCallback( async ()=>{
     try {
