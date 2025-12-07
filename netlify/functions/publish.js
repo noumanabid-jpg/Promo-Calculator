@@ -15,7 +15,7 @@ exports.handler = async (event) => {
     }
 
     const shop  = process.env.SHOPIFY_STORE
-    const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN       // ✅ FIXED HERE
+    const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
 
     if (!shop || !token) {
       return {
@@ -29,7 +29,8 @@ exports.handler = async (event) => {
 
     const body  = event.body ? JSON.parse(event.body) : {}
     const items = Array.isArray(body.items) ? body.items : []
-    const week  = body.week || null
+    const weekFromBody = body.week && String(body.week).trim()
+    const week = weekFromBody || new Date().toISOString().slice(0, 10)
 
     if (!items.length) {
       return {
@@ -52,9 +53,10 @@ exports.handler = async (event) => {
       return resp
     }
 
-    // 1) Build map: productId -> { regular, promo }
+    // 1) Build map: productId -> { regular, promo } and track variant_ids
     const productConfig    = new Map()   // productId -> { regular, promo }
     const variantToProduct = new Map()   // variantId -> productId
+    const allVariantIds    = new Set()   // for campaign metadata
 
     for (const it of items) {
       const variantId = it.variant_id
@@ -62,6 +64,8 @@ exports.handler = async (event) => {
       const promo     = Number(it.promo_price ?? 0)
 
       if (!variantId || !promo || promo <= 0) continue
+
+      allVariantIds.add(variantId)
 
       let productId = variantToProduct.get(variantId)
 
@@ -160,15 +164,22 @@ exports.handler = async (event) => {
     if (getStoreSafe && productConfig.size) {
       try {
         const store = getStoreSafe('promo-campaigns')
-        const id    = new Date().toISOString()
+
+        // ISO string is nice for sorting and human reading
+        const id         = new Date().toISOString()
         const created_at = id
+
         const product_ids = Array.from(productConfig.keys())
+        const variant_ids = Array.from(allVariantIds)
 
         const campaign = {
           id,
           week,
           created_at,
-          product_ids
+          product_ids,
+          variant_ids,
+          product_count: product_ids.length,
+          item_count: items.length
         }
 
         // Save detailed campaign
@@ -178,14 +189,18 @@ exports.handler = async (event) => {
         let index = []
         const raw = await store.get('index')
         if (raw) {
-          try { index = JSON.parse(raw) || [] } catch {}
+          try { index = JSON.parse(raw) || [] } catch (e) {
+            console.error('Failed to parse campaign index, resetting', e)
+            index = []
+          }
         }
 
         index.unshift({
           id,
           week,
           created_at,
-          product_count: product_ids.length
+          product_count: product_ids.length,
+          item_count: items.length
         })
 
         // keep last 50 campaigns
