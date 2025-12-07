@@ -1,7 +1,5 @@
 // netlify/functions/publish.js
 
-const { getStore } = require('@netlify/blobs');
-
 exports.handler = async (event) => {
   try {
     if (event.httpMethod !== 'POST') {
@@ -21,9 +19,9 @@ exports.handler = async (event) => {
       };
     }
 
-    const body = event.body ? JSON.parse(event.body) : {};
+    const body  = event.body ? JSON.parse(event.body) : {};
     const items = Array.isArray(body.items) ? body.items : [];
-    const week  = body.week || null;
+    const week  = body.week || null; // not strictly needed yet, but kept for future
 
     if (!items.length) {
       return {
@@ -32,7 +30,7 @@ exports.handler = async (event) => {
       };
     }
 
-    // Helper: REST call to Shopify
+    // Helper to call Shopify REST Admin
     async function shopifyFetch(path, opts = {}) {
       const url = `https://${shop}/admin/api/2024-07${path}`;
       const resp = await fetch(url, {
@@ -46,9 +44,8 @@ exports.handler = async (event) => {
       return resp;
     }
 
-    // 1) Build a map: productId -> { regular, promo }
-    // We derive productId from each line's variant via REST.
-    const productConfig = new Map(); // productId -> { regular, promo }
+    // 1) Build map: productId -> { regular, promo }
+    const productConfig = new Map();   // productId -> { regular, promo }
     const variantToProduct = new Map(); // variantId -> productId
 
     for (const it of items) {
@@ -58,13 +55,11 @@ exports.handler = async (event) => {
 
       if (!variantId || !promo || promo <= 0) continue;
 
-      // If we already know this variant's product, re-use it
       let productId = variantToProduct.get(variantId);
 
       if (!productId) {
-        const vResp = await shopifyFetch(`/variants/${variantId}.json`, {
-          method: 'GET'
-        });
+        // lookup variant to find its product_id
+        const vResp = await shopifyFetch(`/variants/${variantId}.json`, { method: 'GET' });
 
         if (!vResp.ok) {
           const t = await vResp.text();
@@ -79,7 +74,7 @@ exports.handler = async (event) => {
         variantToProduct.set(variantId, productId);
       }
 
-      // Only set config if not already existing (first line wins per product)
+      // For now, first promo for a product wins
       if (!productConfig.has(productId)) {
         productConfig.set(productId, { regular, promo });
       }
@@ -95,16 +90,13 @@ exports.handler = async (event) => {
       };
     }
 
-    // 2) For each product, fetch all variants, snapshot original prices, then update all variants
+    // 2) For each product, fetch all variants & update them
     let updated = 0;
     const errors = [];
-    const snapshotVariants = []; // for rollback
 
     for (const [productId, cfg] of productConfig.entries()) {
       try {
-        const pResp = await shopifyFetch(`/products/${productId}.json`, {
-          method: 'GET'
-        });
+        const pResp = await shopifyFetch(`/products/${productId}.json`, { method: 'GET' });
 
         if (!pResp.ok) {
           const t = await pResp.text();
@@ -119,21 +111,11 @@ exports.handler = async (event) => {
 
         const { regular, promo } = cfg;
 
-        // If no regular given, we use each variant's own original as compare_at_price
         for (const v of prod.variants) {
           const variantId = v.id;
           const originalPrice = v.price;
-          const originalCompareAt = v.compare_at_price;
 
-          // Save snapshot for rollback
-          snapshotVariants.push({
-            id: variantId,
-            price: originalPrice,
-            compare_at_price: originalCompareAt
-          });
-
-          // Decide new price + compare_at
-          const newPrice = promo; // apply same promo to all variants of this product
+          const newPrice = promo;  // apply same promo value to all variants of this product
           const newCompareAt = regular > 0 ? regular : originalPrice;
 
           const payload = {
@@ -166,24 +148,13 @@ exports.handler = async (event) => {
       }
     }
 
-    // 3) Save snapshot for rollback in Netlify Blobs (latest campaign)
-    if (snapshotVariants.length) {
-      const store = getStore('promo-campaigns');
-      const campaign = {
-        id: new Date().toISOString(),
-        week,
-        created_at: new Date().toISOString(),
-        variants: snapshotVariants
-      };
-      await store.set('latest', JSON.stringify(campaign));
-    }
-
     return {
       statusCode: 200,
       body: JSON.stringify({
         ok: errors.length === 0,
         updated,
-        errors
+        errors,
+        week
       })
     };
   } catch (err) {
