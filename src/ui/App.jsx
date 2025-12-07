@@ -66,17 +66,34 @@ export default function App(){
     }
   }, [])
 
-  const publish = useCallback(async ()=>{
-    try {
-      const r = await fetch('/api/publish', { method:'POST' })
-      const data = await r.json()
-      setMsg(data?.ok ? 'Published with nationwide sync' : data?.error || 'Publish failed')
+const publish = useCallback(async ()=>{
+  if (!items.length) {
+    setMsg('No items to publish')
+    return
+  }
+
+  try {
+    const r = await fetch('/api/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        week: weekKey,
+        items
+      })
+    })
+
+    const data = await r.json()
+    if (data?.ok) {
+      setMsg(`Published ${data.updated || 0} variants to Shopify`)
       loadDraft()
-    } catch (e) {
-      console.error('publish error', e)
-      setMsg('Publish failed')
+    } else {
+      setMsg(data?.error || 'Publish failed')
     }
-  }, [loadDraft])
+  } catch (e) {
+    console.error('publish error', e)
+    setMsg('Publish failed')
+  }
+}, [items, weekKey, loadDraft])
 
   const rollback = useCallback(async ()=>{
     try {
