@@ -1,93 +1,94 @@
 // netlify/functions/products-search.js
-const { shopifyGraphql } = require('./utils/shopify.js')
+
+// Netlify (Node 18+) already has global fetch available – no imports needed.
 
 exports.handler = async (event) => {
   try {
-    const shop = process.env.SHOPIFY_STORE
-    const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
+    const shop = process.env.SHOPIFY_STORE;
+    const token = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
 
     if (!shop || !token) {
-      console.error('Missing env vars', { shop, hasToken: !!token })
+      console.error('Missing env vars', { shop, hasToken: !!token });
       return {
         statusCode: 500,
-        body: JSON.stringify({ error: 'Missing SHOPIFY_STORE or SHOPIFY_ADMIN_ACCESS_TOKEN' })
-      }
+        body: JSON.stringify({ error: 'Missing SHOPIFY_STORE or SHOPIFY_ADMIN_ACCESS_TOKEN' }),
+      };
     }
 
-    const q = (event.queryStringParameters?.q || '').trim()
+    const q = (event.queryStringParameters?.q || '').trim();
     if (!q) {
       return {
         statusCode: 200,
-        body: JSON.stringify({ items: [] })
-      }
+        body: JSON.stringify({ items: [] }),
+      };
     }
 
-    // Search by title or SKU
-    const query = `#graphql
-      query SearchProducts($query: String!) {
-        products(first: 20, query: $query) {
-          edges {
-            node {
-              id
-              title
-              productType
-              variants(first: 5) {
-                edges {
-                  node {
-                    id
-                    title
-                    sku
-                    price
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `
+    // Use REST Admin API to get products + variants, then filter by title/SKU in JS
+    const url = `https://${shop}/admin/api/2024-07/products.json?limit=50&status=active&fields=id,title,product_type,variants`;
 
-    const searchQuery = `title:*${q}* OR sku:${q}*`
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'X-Shopify-Access-Token': token,
+        'Content-Type': 'application/json',
+      },
+    });
 
-    const result = await shopifyGraphql({
-      shop,
-      token,
-      query,
-      variables: { query: searchQuery }
-    })
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error('Shopify REST error', resp.status, text);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'Shopify REST error', status: resp.status }),
+      };
+    }
 
-    const edges = result?.data?.products?.edges || []
-    const items = edges.flatMap((e) => {
-      const node = e.node
-      const vEdges = node.variants?.edges || []
-      return vEdges.map((ve) => {
-        const v = ve.node
-        return {
-          id: node.id,
-          variant_id: v.id,
-          title: node.title,
-          variant: v.title,
-          sku: v.sku,
-          category: node.productType || '',
-          price: Number(v.price ?? 0),
-          cost: 0,
-          promo_price: Number(v.price ?? 0),
-          margin_promo: 0,
-          round_rule: '',
-          flags: []
-        }
-      })
-    })
+    const data = await resp.json();
+    const products = data.products || [];
+    const qLower = q.toLowerCase();
+
+    const items = products.flatMap((p) => {
+      const matchesTitle = (p.title || '').toLowerCase().includes(qLower);
+      const vEdges = p.variants || [];
+
+      return vEdges
+        .filter((v) => {
+          const sku = (v.sku || '').toLowerCase();
+          const vTitle = (v.title || '').toLowerCase();
+          return matchesTitle || sku.includes(qLower) || vTitle.includes(qLower);
+        })
+        .map((v) => {
+          const price = Number(v.price ?? 0);
+          const cost = 0; // you can later enrich this from ERP if needed
+          const promo = price;
+          const margin_promo = promo > 0 ? (promo - cost) / promo : 0;
+
+          return {
+            id: p.id,
+            variant_id: v.id,
+            title: p.title,
+            variant: v.title,
+            sku: v.sku,
+            category: p.product_type || '',
+            price,
+            cost,
+            promo_price: promo,
+            margin_promo,
+            round_rule: '',
+            flags: [],
+          };
+        });
+    });
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ items })
-    }
+      body: JSON.stringify({ items }),
+    };
   } catch (err) {
-    console.error('products-search error', err.response || err.message || err)
+    console.error('products-search error', err);
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: 'Server error' })
-    }
+      body: JSON.stringify({ error: 'Server error' }),
+    };
   }
-}
+};
