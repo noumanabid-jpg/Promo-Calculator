@@ -16,6 +16,12 @@ export default function App(){
   const [weeks, setWeeks] = useState([])
   const [msg, setMsg] = useState('')
 
+  // NEW: search state for manual add
+  const [searchTerm, setSearchTerm] = useState('')
+  const [searchResults, setSearchResults] = useState([])
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchError, setSearchError] = useState('')
+
   const weekKey = draft.week || new Date().toISOString().slice(0,10)
 
   const loadDraft = useCallback(async ()=>{
@@ -137,6 +143,70 @@ export default function App(){
     )
   }
 
+  // NEW: remove one item from the draft (suggested or manually added)
+  const removeItem = (index)=>{
+    setItems(prev => prev.filter((_, i)=> i !== index))
+  }
+
+  // NEW: search products by name/SKU via /api/products-search
+  const searchProducts = useCallback(async ()=>{
+    const q = searchTerm.trim()
+    if (!q) return
+    setSearchLoading(true)
+    setSearchError('')
+    try {
+      const r = await fetch(`/api/products-search?q=${encodeURIComponent(q)}`)
+      if (!r.ok) {
+        throw new Error(`HTTP ${r.status}`)
+      }
+      const data = await r.json()
+      // backend can return { items: [...] } or { products: [...] }
+      const list = data.items || data.products || []
+      setSearchResults(list)
+    } catch (e) {
+      console.error('products-search error', e)
+      setSearchError('Could not fetch products. Please try again.')
+      setSearchResults([])
+    } finally {
+      setSearchLoading(false)
+    }
+  }, [searchTerm])
+
+  // NEW: add a product from searchResults into items[]
+  const addSearchResultToDraft = (p)=>{
+    setItems(prev => {
+      // avoid duplicates by variant_id or id+sku
+      const exists = prev.some(it =>
+        (p.variant_id && it.variant_id === p.variant_id) ||
+        (p.id && it.id === p.id && p.sku && it.sku === p.sku)
+      )
+      if (exists) return prev
+
+      const price = Number(p.price ?? 0)
+      const cost  = Number(p.cost ?? 0)
+      const promo = Number(p.promo_price ?? price)
+      const margin_promo = promo > 0 ? (promo - cost) / promo : 0
+
+      const nextItem = {
+        // try to stay close to existing shape the backend uses
+        id: p.id,
+        variant_id: p.variant_id,
+        title: p.title || p.product_title || 'Untitled',
+        variant: p.variant || p.variant_title || '',
+        sku: p.sku || '',
+        category: p.category || '',
+        price,
+        cost,
+        promo_price: promo,
+        margin_promo,
+        round_rule: p.round_rule || '',
+        flags: p.flags || []
+      }
+
+      return [...prev, nextItem]
+    })
+  }
+
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
       <header className="mx-auto max-w-6xl px-4 py-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -163,7 +233,7 @@ export default function App(){
       </header>
 
       {tab==='planner' ? (
-        <section className="mx-auto max-w-6xl px-4 pb-10">
+        <section overlooking className="mx-auto max-w-6xl px-4 pb-10">
           <div className="mb-4 flex items-center gap-2 justify-between">
             <div className="text-xs text-neutral-500">
               No time-gating: you can generate draft any day.
@@ -221,17 +291,91 @@ export default function App(){
             </div>
           ) : null}
 
+          {/* NEW: manual control bar – remove suggested, search & add */}
+          <div className="mb-6 rounded-2xl border bg-white p-4 shadow-sm">
+            <h2 className="text-sm font-semibold mb-3">
+              Manual adjustments
+            </h2>
+            <p className="text-xs text-neutral-500 mb-2">
+              Remove any suggested item below, or search by product name / SKU to add your own picks.
+            </p>
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e)=>setSearchTerm(e.target.value)}
+                placeholder="Search by product name or SKU…"
+                className="flex-1 rounded-md border px-3 py-2 text-sm"
+              />
+              <button
+                type="button"
+                onClick={searchProducts}
+                className="mt-2 sm:mt-0 rounded-2xl border px-4 py-2 text-sm bg-neutral-900 text-white disabled:opacity-60"
+                disabled={searchLoading}
+              >
+                {searchLoading ? 'Searching…' : 'Search & Add'}
+              </button>
+            </div>
+
+            {searchError && (
+              <div className="mt-2 text-xs text-red-600">{searchError}</div>
+            )}
+
+            {searchResults.length > 0 && (
+              <div className="mt-3 max-h-56 overflow-auto border-t pt-2 space-y-2">
+                {searchResults.map((p)=>(
+                  <div
+                    key={p.variant_id || p.id || p.sku}
+                    className="flex items-center justify-between text-sm py-1 border-b last:border-b-0"
+                  >
+                    <div className="pr-3">
+                      <div className="font-medium">
+                        {p.title || p.product_title || 'Untitled'}
+                      </div>
+                      <div className="text-xs text-neutral-500">
+                        {p.variant || p.variant_title} {p.sku ? `· SKU ${p.sku}` : ''}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={()=>addSearchResultToDraft(p)}
+                      className="text-xs px-2 py-1 border rounded-md hover:bg-green-50 hover:text-green-700"
+                    >
+                      Add to draft
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {(items||[]).map((x, idx)=> (
-              <article key={x.variant_id || x.sku || idx} className="rounded-2xl border bg-white p-4 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
+              <article
+                key={x.variant_id || x.sku || idx}
+                className="rounded-2xl border bg-white p-4 shadow-[0_2px_10px_rgba(0,0,0,0.04)]"
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <h3 className="font-semibold leading-tight">{x.title} — {x.variant}</h3>
+                    <h3 className="font-semibold leading-tight">
+                      {x.title} — {x.variant}
+                    </h3>
                     <p className="text-xs text-neutral-500 mt-0.5">
                       {x.category?.toUpperCase?.()} · SKU {x.sku}
                     </p>
                   </div>
-                  <Chip>{x.category}</Chip>
+                  <div className="flex flex-col items-end gap-1">
+                    <Chip>{x.category}</Chip>
+                    {/* NEW: remove button per item */}
+                    <button
+                      type="button"
+                      onClick={()=>removeItem(idx)}
+                      className="text-[11px] text-red-600 hover:text-red-700 hover:underline"
+                    >
+                      Remove
+                    </button>
+                  </div>
                 </div>
                 <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
                   {/* Regular (editable) */}
@@ -286,7 +430,9 @@ export default function App(){
                   </div>
                   <div className="rounded-xl bg-neutral-50 p-3">
                     <dt className="text-neutral-500">Flags</dt>
-                    <dd className="font-semibold text-xs">{(x.flags||[]).join(', ')||'-'}</dd>
+                    <dd className="font-semibold text-xs">
+                      {(x.flags||[]).join(', ')||'-'}
+                    </dd>
                   </div>
                 </dl>
               </article>
