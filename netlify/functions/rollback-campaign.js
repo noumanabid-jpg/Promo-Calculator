@@ -1,38 +1,46 @@
 // netlify/functions/rollback-campaign.js
 
+/* ------------------ B L O B S   H E L P E R ------------------ */
+
 let getStoreSafe = null;
 try {
   ({ getStore: getStoreSafe } = require('@netlify/blobs'));
 } catch (e) {
-  console.warn('[rollback-campaign] @netlify/blobs not available', e);
+  console.warn('[rollback] @netlify/blobs not available', e);
 }
 
 function getCampaignStore() {
-  if (!getStoreSafe) {
-    console.warn('[rollback-campaign] getStoreSafe is null');
-    return null;
-  }
+  if (!getStoreSafe) return null;
 
-  const siteID = process.env.NETLIFY_SITE_ID;
-  const token  = process.env.NETLIFY_BLOBS_TOKEN;
+  const siteID =
+    process.env.NETLIFY_SITE_ID ||
+    process.env.BLOBS_SITE_ID ||
+    process.env.SITE_ID;
+
+  const token =
+    process.env.NETLIFY_BLOBS_TOKEN ||
+    process.env.BLOBS_TOKEN ||
+    process.env.NETLIFY_API_TOKEN;
 
   if (!siteID || !token) {
-    console.warn('[rollback-campaign] Missing NETLIFY_SITE_ID or NETLIFY_BLOBS_TOKEN');
+    console.warn('[rollback] Missing env vars for Blobs');
     return null;
   }
 
   try {
     return getStoreSafe('promo-campaigns', { siteID, token });
   } catch (e) {
-    console.error('[rollback-campaign] getStore failed', e);
+    console.error('[rollback] getStore failed', e);
     return null;
   }
 }
 
+/* ------------------ H A N D L E R ------------------ */
+
 exports.handler = async (event) => {
   try {
     if (event.httpMethod !== 'POST') {
-      return { statusCode: 405, body: 'Method Not Allowed' };
+      return { statusCode: 405, body: 'Method not allowed' };
     }
 
     const shop  = process.env.SHOPIFY_STORE;
@@ -41,21 +49,7 @@ exports.handler = async (event) => {
     if (!shop || !token) {
       return {
         statusCode: 500,
-        body: JSON.stringify({
-          ok: false,
-          error: 'Missing SHOPIFY_STORE or SHOPIFY_ADMIN_ACCESS_TOKEN'
-        })
-      };
-    }
-
-    const store = getCampaignStore();
-    if (!store) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({
-          ok: false,
-          error: 'Campaign storage not configured'
-        })
+        body: JSON.stringify({ ok: false, error: 'Missing Shopify env vars' })
       };
     }
 
@@ -63,12 +57,19 @@ exports.handler = async (event) => {
     if (!id) {
       return {
         statusCode: 400,
-        body: JSON.stringify({ ok: false, error: 'Missing campaign id' })
+        body: JSON.stringify({ ok: false, error: 'Missing id' })
+      };
+    }
+
+    const store = getCampaignStore();
+    if (!store) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ ok: false, error: 'Blobs store unavailable' })
       };
     }
 
     const raw = await store.get(`campaign:${id}`);
-
     if (!raw) {
       return {
         statusCode: 404,
@@ -78,135 +79,59 @@ exports.handler = async (event) => {
 
     let campaign;
     try {
-      campaign = JSON.parse(raw) || {};
-    } catch (e) {
-      console.error('Failed to parse campaign', e);
+      campaign = JSON.parse(raw);
+    } catch {
       return {
         statusCode: 500,
         body: JSON.stringify({ ok: false, error: 'Invalid campaign data' })
       };
     }
 
-    const productIds = Array.isArray(campaign.product_ids) ? campaign.product_ids : [];
-    const variantIdsFromCampaign = Array.isArray(campaign.variant_ids) ? campaign.variant_ids : [];
+    const variantIds = campaign.variant_ids || [];
 
     async function shopifyFetch(path, opts = {}) {
       const url = `https://${shop}/admin/api/2024-07${path}`;
-      const resp = await fetch(url, {
+      return await fetch(url, {
         headers: {
           'X-Shopify-Access-Token': token,
-          'Content-Type': 'application/json',
-          ...(opts.headers || {})
+          'Content-Type': 'application/json'
         },
         ...opts
       });
-      return resp;
     }
 
     let restored = 0;
     const errors = [];
 
-    // Prefer variant_ids if present
-    if (variantIdsFromCampaign.length) {
-      for (const variantId of variantIdsFromCampaign) {
-        try {
-          const vResp = await shopifyFetch(`/variants/${variantId}.json`, { method: 'GET' });
-          if (!vResp.ok) {
-            const t = await vResp.text();
-            console.error('Failed to fetch variant for rollback-campaign', variantId, vResp.status, t);
-            errors.push({ variant_id: variantId, error: `Variant fetch error ${vResp.status}` });
-            continue;
+    for (const variantId of variantIds) {
+      try {
+        const vResp = await shopifyFetch(`/variants/${variantId}.json`);
+        const vData = await vResp.json();
+
+        const compareAt = vData?.variant?.compare_at_price;
+        if (!compareAt) continue;
+
+        const payload = {
+          variant: {
+            id: variantId,
+            price: compareAt,
+            compare_at_price: null
           }
+        };
 
-          const vData = await vResp.json();
-          const v = vData?.variant;
-          if (!v || !v.compare_at_price) continue;
+        const upResp = await shopifyFetch(`/variants/${variantId}.json`, {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
 
-          const payload = {
-            variant: {
-              id: variantId,
-              price: v.compare_at_price,
-              compare_at_price: null
-            }
-          };
-
-          const upResp = await shopifyFetch(`/variants/${variantId}.json`, {
-            method: 'PUT',
-            body: JSON.stringify(payload)
-          });
-
-          if (!upResp.ok) {
-            const t = await upResp.text();
-            console.error('Rollback-campaign update error', variantId, upResp.status, t);
-            errors.push({
-              variant_id: variantId,
-              error: `Rollback update error ${upResp.status}`
-            });
-          } else {
-            restored++;
-          }
-        } catch (err) {
-          console.error('Rollback-campaign variant loop error', variantId, err);
-          errors.push({ variant_id: variantId, error: err.message || String(err) });
+        if (!upResp.ok) {
+          errors.push({ variantId, error: `Update failed ${upResp.status}` });
+        } else {
+          restored++;
         }
+      } catch (err) {
+        errors.push({ variantId, error: err.message });
       }
-    } else if (productIds.length) {
-      // Fallback: product-level rollback
-      for (const productId of productIds) {
-        try {
-          const pResp = await shopifyFetch(`/products/${productId}.json`, { method: 'GET' });
-
-          if (!pResp.ok) {
-            const t = await pResp.text();
-            console.error('Failed to fetch product for rollback-campaign', productId, pResp.status, t);
-            errors.push({ product_id: productId, error: `Product fetch error ${pResp.status}` });
-            continue;
-          }
-
-          const pData = await pResp.json();
-          const prod  = pData?.product;
-          if (!prod || !Array.isArray(prod.variants)) continue;
-
-          for (const v of prod.variants) {
-            const variantId = v.id;
-            const compareAt = v.compare_at_price;
-
-            if (!compareAt) continue;
-
-            const payload = {
-              variant: {
-                id: variantId,
-                price: compareAt,
-                compare_at_price: null
-              }
-            };
-
-            const upResp = await shopifyFetch(`/variants/${variantId}.json`, {
-              method: 'PUT',
-              body: JSON.stringify(payload)
-            });
-
-            if (!upResp.ok) {
-              const t = await upResp.text();
-              console.error('Rollback-campaign update error', variantId, upResp.status, t);
-              errors.push({
-                variant_id: variantId,
-                error: `Rollback update error ${upResp.status}`
-              });
-            } else {
-              restored++;
-            }
-          }
-        } catch (err) {
-          console.error('Rollback-campaign product loop error', productId, err);
-          errors.push({ product_id: productId, error: err.message || String(err) });
-        }
-      }
-    } else {
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ ok: false, error: 'Campaign has no products recorded' })
-      };
     }
 
     return {
@@ -214,19 +139,14 @@ exports.handler = async (event) => {
       body: JSON.stringify({
         ok: errors.length === 0,
         restored,
-        errors,
-        campaign_id: campaign.id,
-        week: campaign.week
+        errors
       })
     };
   } catch (err) {
-    console.error('rollback-campaign function error', err);
+    console.error('[rollback] Fatal error', err);
     return {
       statusCode: 500,
-      body: JSON.stringify({
-        ok: false,
-        error: 'Server error in rollback-campaign function'
-      })
+      body: JSON.stringify({ ok: false, error: 'Server error' })
     };
   }
 };
