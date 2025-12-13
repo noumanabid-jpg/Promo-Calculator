@@ -1,54 +1,6 @@
 // netlify/functions/publish.js
 
-/* ------------------ B L O B S   H E L P E R ------------------ */
-
-let getStoreSafe = null;
-try {
-  ({ getStore: getStoreSafe } = require("@netlify/blobs"));
-} catch (e) {
-  console.warn("[publish] @netlify/blobs not available", e?.message || e);
-}
-
-function getCampaignStore() {
-  if (!getStoreSafe) {
-    console.warn("[publish] getStoreSafe is null (blobs module not loadable)");
-    return null;
-  }
-
-  const siteID =
-    process.env.NETLIFY_SITE_ID ||
-    process.env.BLOBS_SITE_ID ||
-    process.env.SITE_ID;
-
-  // ✅ IMPORTANT: match YOUR env var name
-  const blobsToken =
-    process.env.NETLIFY_BLOBS_TOKEN ||
-    process.env.BLOBS_TOKEN ||
-    process.env.NETLIFY_API_TOKEN ||
-    process.env.NETLIFY_AUTH_TOKEN;
-
-  if (!siteID || !blobsToken) {
-    console.warn("[publish] Missing blobs env vars. Found:", {
-      NETLIFY_SITE_ID: !!process.env.NETLIFY_SITE_ID,
-      BLOBS_SITE_ID: !!process.env.BLOBS_SITE_ID,
-      SITE_ID: !!process.env.SITE_ID,
-      NETLIFY_BLOBS_TOKEN: !!process.env.NETLIFY_BLOBS_TOKEN,
-      BLOBS_TOKEN: !!process.env.BLOBS_TOKEN,
-      NETLIFY_API_TOKEN: !!process.env.NETLIFY_API_TOKEN,
-      NETLIFY_AUTH_TOKEN: !!process.env.NETLIFY_AUTH_TOKEN
-    });
-    return null;
-  }
-
-  try {
-    return getStoreSafe("promo-campaigns", { siteID, token: blobsToken });
-  } catch (e) {
-    console.error("[publish] getStore failed", e?.message || e);
-    return null;
-  }
-}
-
-/* ------------------ H A N D L E R ------------------ */
+const { getCampaignStore } = require("./utils/blobsStore");
 
 exports.handler = async (event) => {
   try {
@@ -57,12 +9,15 @@ exports.handler = async (event) => {
     }
 
     const shop = process.env.SHOPIFY_STORE;
-    const shopifyToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN; // ✅ avoid name collision
+    const shopifyToken = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
 
     if (!shop || !shopifyToken) {
       return {
         statusCode: 500,
-        body: JSON.stringify({ ok: false, error: "Missing Shopify env vars" })
+        body: JSON.stringify({
+          ok: false,
+          error: "Missing SHOPIFY_STORE or SHOPIFY_ADMIN_ACCESS_TOKEN",
+        }),
       };
     }
 
@@ -73,7 +28,7 @@ exports.handler = async (event) => {
     if (!items.length) {
       return {
         statusCode: 400,
-        body: JSON.stringify({ ok: false, error: "No items to publish" })
+        body: JSON.stringify({ ok: false, error: "No items to publish" }),
       };
     }
 
@@ -83,17 +38,18 @@ exports.handler = async (event) => {
         headers: {
           "X-Shopify-Access-Token": shopifyToken,
           "Content-Type": "application/json",
-          ...(opts.headers || {})
+          ...(opts.headers || {}),
         },
-        ...opts
+        ...opts,
       });
       return resp;
     }
 
-    // Map of product → { regular_price, promo_price }
-    const productConfig = new Map();      // productId -> { regular, promo }
-    const variantToProduct = new Map();   // variantId -> productId
-    const allVariantIds = new Set();      // variants included in planner items (not all product variants)
+    // Build product-level config from the planner items:
+    // productId -> { regular, promo }
+    const productConfig = new Map();
+    const variantToProduct = new Map();
+    const plannerVariantIds = new Set(); // only variants that were in the planner
 
     // ----------------- Build productConfig -----------------
     for (const it of items) {
@@ -103,16 +59,18 @@ exports.handler = async (event) => {
 
       if (!variantId || !promo || promo <= 0) continue;
 
-      allVariantIds.add(Number(variantId));
+      plannerVariantIds.add(Number(variantId));
 
       let productId = variantToProduct.get(variantId);
 
       if (!productId) {
-        const vResp = await shopifyFetch(`/variants/${variantId}.json`, { method: "GET" });
+        const vResp = await shopifyFetch(`/variants/${variantId}.json`, {
+          method: "GET",
+        });
 
         if (!vResp.ok) {
           const t = await vResp.text();
-          console.error("[publish] Variant fetch failed", variantId, vResp.status, t);
+          console.error("[publish] Variant lookup failed:", variantId, vResp.status, t);
           continue;
         }
 
@@ -123,7 +81,7 @@ exports.handler = async (event) => {
         variantToProduct.set(variantId, productId);
       }
 
-      // First item for a product sets the product-level config.
+      // First item sets the product-level promo/regular
       if (!productConfig.has(productId)) {
         productConfig.set(productId, { regular, promo });
       }
@@ -132,27 +90,30 @@ exports.handler = async (event) => {
     if (!productConfig.size) {
       return {
         statusCode: 200,
-        body: JSON.stringify({ ok: false, error: "No valid promo items" })
+        body: JSON.stringify({ ok: false, error: "No valid promo items found" }),
       };
     }
 
-    // ----------------- Update Shopify (ALL variants for each product) -----------------
+    // ----------------- Update Shopify (ALL variants per product) -----------------
     let updated = 0;
     const errors = [];
 
     for (const [productId, cfg] of productConfig.entries()) {
       try {
-        const pResp = await shopifyFetch(`/products/${productId}.json`, { method: "GET" });
+        const pResp = await shopifyFetch(`/products/${productId}.json`, {
+          method: "GET",
+        });
 
         if (!pResp.ok) {
           const t = await pResp.text();
-          console.error("[publish] Product fetch failed", productId, pResp.status, t);
+          console.error("[publish] Product fetch failed:", productId, pResp.status, t);
           errors.push({ productId, error: `Product fetch failed ${pResp.status}` });
           continue;
         }
 
         const pData = await pResp.json();
         const prod = pData?.product;
+
         if (!prod || !Array.isArray(prod.variants)) continue;
 
         for (const v of prod.variants) {
@@ -162,40 +123,41 @@ exports.handler = async (event) => {
             variant: {
               id: variantId,
               price: cfg.promo,
-              compare_at_price: cfg.regular
-            }
+              compare_at_price: cfg.regular,
+            },
           };
 
           const upResp = await shopifyFetch(`/variants/${variantId}.json`, {
             method: "PUT",
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
           });
 
           if (!upResp.ok) {
             const t = await upResp.text();
-            console.error("[publish] Update failed", variantId, upResp.status, t);
+            console.error("[publish] Variant update failed:", variantId, upResp.status, t);
             errors.push({ variantId, error: `Update failed ${upResp.status}` });
           } else {
             updated++;
           }
         }
       } catch (err) {
-        console.error("[publish] Product loop error", productId, err);
+        console.error("[publish] Error updating product:", productId, err);
         errors.push({ productId, error: err?.message || String(err) });
       }
     }
 
-    // ----------------- Save Campaign in Blobs (Manual mode: siteID + NETLIFY_BLOBS_TOKEN) -----------------
+    // ----------------- Save Campaign in Blobs (manual mode) -----------------
     let campaignRecorded = false;
 
     try {
       const store = getCampaignStore();
 
-      if (store && productConfig.size) {
+      if (!store) {
+        console.warn("[publish] Campaign store not available → campaign not recorded");
+      } else {
         const id = new Date().toISOString();
-
-        const product_ids = [...productConfig.keys()].map(n => Number(n));
-        const variant_ids = [...allVariantIds].map(n => Number(n));
+        const product_ids = [...productConfig.keys()].map((n) => Number(n));
+        const variant_ids = [...plannerVariantIds].map((n) => Number(n));
 
         const campaign = {
           id,
@@ -204,36 +166,39 @@ exports.handler = async (event) => {
           product_ids,
           variant_ids,
           product_count: product_ids.length,
-          item_count: items.length
+          item_count: items.length,
         };
 
-        // Save detailed campaign
+        // Save detailed campaign record
         await store.set(`campaign:${id}`, JSON.stringify(campaign));
 
         // Update index
         let index = [];
         const raw = await store.get("index");
         if (raw) {
-          try { index = JSON.parse(raw) || []; } catch {}
+          try {
+            index = JSON.parse(raw) || [];
+          } catch {
+            index = [];
+          }
         }
 
         index.unshift({
           id,
           week,
           created_at: id,
-          product_count: product_ids.length
+          product_count: product_ids.length,
         });
 
         index = index.slice(0, 50);
         await store.set("index", JSON.stringify(index));
 
         campaignRecorded = true;
-        console.log("[publish] Campaign recorded", id);
-      } else {
-        console.log("[publish] No Blobs store available → campaign not recorded");
+        console.log("[publish] Campaign recorded:", id);
       }
     } catch (err) {
-      console.error("[publish] Failed to record campaign (non-fatal)", err?.message || err);
+      // Non-fatal — publish still succeeds
+      console.error("[publish] Failed to record campaign (non-fatal):", err?.message || err);
     }
 
     return {
@@ -243,14 +208,14 @@ exports.handler = async (event) => {
         updated,
         errors,
         week,
-        campaignRecorded
-      })
+        campaignRecorded,
+      }),
     };
   } catch (err) {
-    console.error("[publish] Fatal error", err);
+    console.error("[publish] Fatal error:", err);
     return {
       statusCode: 500,
-      body: JSON.stringify({ ok: false, error: "Server error" })
+      body: JSON.stringify({ ok: false, error: "Server error" }),
     };
   }
 };
