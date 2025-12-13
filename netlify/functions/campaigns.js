@@ -1,66 +1,27 @@
 // netlify/functions/campaigns.js
-
-/* ------------------ B L O B S   H E L P E R ------------------ */
-
-let getStoreSafe = null;
-try {
-  ({ getStore: getStoreSafe } = require('@netlify/blobs'));
-} catch (e) {
-  console.warn('[campaigns] @netlify/blobs not available', e);
-}
-
-function getCampaignStore() {
-  if (!getStoreSafe) return null;
-
-  const siteID =
-    process.env.NETLIFY_SITE_ID ||
-    process.env.BLOBS_SITE_ID ||
-    process.env.SITE_ID;
-
-  const token =
-    process.env.NETLIFY_BLOBS_TOKEN ||
-    process.env.BLOBS_TOKEN ||
-    process.env.NETLIFY_API_TOKEN;
-
-  if (!siteID || !token) {
-    console.warn('[campaigns] Missing env vars for Blobs');
-    return null;
-  }
-
-  try {
-    return getStoreSafe('promo-campaigns', { siteID, token });
-  } catch (e) {
-    console.error('[campaigns] getStore failed', e);
-    return null;
-  }
-}
-
-/* ------------------ H A N D L E R ------------------ */
+const { getCampaignStore } = require("./utils/blobsStore");
 
 exports.handler = async (event) => {
   try {
-    if (event.httpMethod !== 'GET') {
-      return { statusCode: 405, body: 'Method not allowed' };
+    if (event.httpMethod !== "GET") {
+      return { statusCode: 405, body: "Method Not Allowed" };
     }
 
     const store = getCampaignStore();
     if (!store) {
       return {
         statusCode: 200,
-        body: JSON.stringify({ ok: true, campaigns: [], blobsEnabled: false })
+        body: JSON.stringify({
+          ok: true,
+          campaigns: [],
+          blobsEnabled: false,
+          hint: "Set NETLIFY_SITE_ID + NETLIFY_BLOBS_TOKEN in Netlify env vars (Functions/Runtime scope)."
+        })
       };
     }
 
-    let campaigns = [];
-    try {
-      const raw = await store.get('index');
-      if (raw) campaigns = JSON.parse(raw) || [];
-    } catch (e) {
-      console.error('[campaigns] Failed reading index', e);
-      campaigns = [];
-    }
-
-    campaigns.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const raw = await store.get("index");
+    const campaigns = raw ? (JSON.parse(raw) || []) : [];
 
     return {
       statusCode: 200,
@@ -71,10 +32,10 @@ exports.handler = async (event) => {
       })
     };
   } catch (err) {
-    console.error('[campaigns] Fatal error', err);
+    console.error("campaigns error", err);
     return {
       statusCode: 500,
-      body: JSON.stringify({ ok: false, campaigns: [], error: 'Server error' })
+      body: JSON.stringify({ ok: false, campaigns: [], error: "Server error" })
     };
   }
 };
