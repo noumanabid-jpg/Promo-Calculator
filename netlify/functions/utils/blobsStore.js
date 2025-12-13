@@ -1,28 +1,31 @@
 // netlify/functions/utils/blobsStore.js
-let getStoreFn = null;
+
+let getStoreSafe = null;
 
 try {
-  ({ getStore: getStoreFn } = require("@netlify/blobs"));
+  ({ getStore: getStoreSafe } = require("@netlify/blobs"));
 } catch (e) {
-  // If module isn't available, we'll just return null stores.
+  console.warn("[blobsStore] @netlify/blobs not available:", e?.message || e);
 }
 
 function getCampaignStore() {
-  if (!getStoreFn) return null;
+  if (!getStoreSafe) {
+    console.warn("[blobsStore] getStore is not available (module failed to load)");
+    return null;
+  }
 
-  const siteID =
-    process.env.NETLIFY_SITE_ID ||
-    process.env.BLOBS_SITE_ID ||
-    process.env.SITE_ID;
+  const siteID = process.env.NETLIFY_SITE_ID;
+  const token = process.env.NETLIFY_BLOBS_TOKEN; // manual mode token (Netlify PAT)
 
-  const token =
-    process.env.NETLIFY_BLOBS_TOKEN ||   // ✅ your env var name
-    process.env.BLOBS_TOKEN ||
-    process.env.NETLIFY_AUTH_TOKEN;
+  console.log("[blobsStore] Env check:", {
+    NETLIFY_SITE_ID: siteID ? "present" : "missing",
+    NETLIFY_BLOBS_TOKEN: token ? "present" : "missing",
+  });
 
   if (!siteID || !token) return null;
 
-  return getStoreFn("promo-campaigns", { siteID, token });
+  // ✅ Manual mode: must be exactly { siteID, token }
+  return getStoreSafe("promo-campaigns", { siteID, token });
 }
 
 module.exports = { getCampaignStore };
