@@ -1,5 +1,4 @@
 // netlify/functions/results.js
-// Netlify Functions require: exports.handler = async (event) => ({...})
 
 const { getStore } = require("@netlify/blobs");
 const { fetchOrdersSince, kpisForWeek, learnHeroes } = require("./_analytics.js");
@@ -7,18 +6,22 @@ const { gql } = require("./_shopify.js");
 
 function getManualStore(name) {
   const siteID = process.env.NETLIFY_SITE_ID;
-  const token = process.env.NETLIFY_BLOBS_TOKEN; // Netlify PAT
+  const token = process.env.NETLIFY_BLOBS_TOKEN;
 
-  // Don’t leak values; just indicate presence
   console.log("[results] Env check:", {
     NETLIFY_SITE_ID: siteID ? "present" : "missing",
     NETLIFY_BLOBS_TOKEN: token ? "present" : "missing",
+    CONTEXT: process.env.CONTEXT || "unknown", // production / deploy-preview / branch-deploy
   });
 
   if (!siteID || !token) return null;
 
-  // ✅ Manual mode store
-  return getStore(name, { siteID, token });
+  try {
+    return getStore(name, { siteID, token });
+  } catch (e) {
+    console.error("[results] getStore failed:", e?.message || e);
+    return null;
+  }
 }
 
 async function getJSON(store, key) {
@@ -33,39 +36,33 @@ async function getJSON(store, key) {
 
 exports.handler = async () => {
   try {
-    // Use same store as drafts/campaigns OR keep separate.
-    // If your drafts are stored elsewhere, change store name accordingly.
-    // Here we reuse a single store and your original key:
     const store = getManualStore("promo-campaigns");
+
+    // ✅ If blobs is not configured, don't crash the app
     if (!store) {
       return {
         statusCode: 200,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ weeks: [], ok: true, blobsEnabled: false }),
+        body: JSON.stringify({
+          ok: true,
+          weeks: [],
+          blobsEnabled: false,
+          note: "Blobs store not available (missing env vars or token not valid for this site).",
+        }),
       };
     }
 
     const week = new Date().toISOString().slice(0, 10);
-
-    // Your original key:
-    // promo_weeks/{week}.json
     const draft = await getJSON(store, `promo_weeks/${week}.json`);
 
-    // Compute KPIs from orders (last 8 weeks proxy)
     const orders = await fetchOrdersSince(56);
-
     let weeks = [];
+
     if (draft?.items?.length) {
       const k = kpisForWeek(draft.items, orders);
-      weeks.push({
-        week,
-        items: draft.items.length,
-        ...k,
-        status: draft.status || "draft",
-      });
+      weeks.push({ week, items: draft.items.length, ...k, status: draft.status || "draft" });
     }
 
-    // Hero learning (only if published)
     if (draft?.status === "published") {
       const perf = [];
       const byVariant = {};
@@ -83,7 +80,6 @@ exports.handler = async () => {
       }
 
       const heroes = learnHeroes(perf);
-
       if (heroes.size > 0) {
         const MU = `#graphql
           mutation SetHero($ownerId:ID!){
@@ -91,7 +87,6 @@ exports.handler = async () => {
               userErrors{ field message }
             }
           }`;
-
         for (const pid of heroes) {
           await gql(MU, { ownerId: pid });
         }
@@ -101,7 +96,7 @@ exports.handler = async () => {
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ weeks, ok: true, blobsEnabled: true }),
+      body: JSON.stringify({ ok: true, weeks, blobsEnabled: true }),
     };
   } catch (err) {
     console.error("[results] fatal error", err);
